@@ -157,6 +157,28 @@ View logs in CloudWatch:
 aws logs tail /aws/lambda/llm-backend --follow
 ```
 
+## Offline Evaluation with MLflow
+
+This repo includes an offline evaluator for `POST /ai/ask` in `evals/`.
+
+Quick start from `lambda_backend/`:
+
+```powershell
+python -m pip install -r evals/requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+In another terminal:
+
+```powershell
+python evals/run_ai_offline_eval.py --api-base-url http://localhost:8000
+mlflow ui --backend-store-uri sqlite:///mlflow.db --port 5001
+```
+
+Detailed guide:
+
+- `evals/README.md`
+
 ## Cost Estimation
 
 For 100,000 requests/month with 2s average duration:

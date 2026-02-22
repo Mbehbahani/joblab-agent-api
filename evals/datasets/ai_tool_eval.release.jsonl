@@ -1,0 +1,39 @@
+{"id":"s01","prompt":"Count jobs by country posted after 2026-01-01","expected_primary_tool":"job_stats","required_filters":{"metric":"count","group_by":"country","posted_start":"2026-01-01"}}
+{"id":"s02","prompt":"Count remote jobs by platform posted after 2026-01-01","expected_primary_tool":"job_stats","required_filters":{"metric":"count","group_by":"platform","is_remote":true,"posted_start":"2026-01-01"}}
+{"id":"s03","prompt":"Show month-over-month trend of remote jobs in Germany since 2026-01-01","expected_primary_tool":"job_stats","required_filters":{"metric":"count","group_by":"posted_month","is_remote":true,"country":{"contains":"germany"},"posted_start":"2026-01-01"}}
+{"id":"s04","prompt":"Compare research job distribution by country after 2026-01-01","expected_primary_tool":"job_stats","required_filters":{"metric":"count","group_by":"country","is_research":true,"posted_start":"2026-01-01"}}
+{"id":"s05","prompt":"Count jobs by job_function_std in France after 2026-01-01","expected_primary_tool":"job_stats","required_filters":{"metric":"count","group_by":"job_function_std","country":{"contains":"france"},"posted_start":"2026-01-01"}}
+{"id":"s06","prompt":"Count jobs by job_level_std in USA after 2026-01-01","expected_primary_tool":"job_stats","required_filters":{"metric":"count","group_by":"job_level_std","country":{"contains":"usa"},"posted_start":"2026-01-01"}}
+{"id":"s07","prompt":"Count jobs by job_type_filled in Canada after 2026-01-01","expected_primary_tool":"job_stats","required_filters":{"metric":"count","group_by":"job_type_filled","country":{"contains":"canada"},"posted_start":"2026-01-01"}}
+{"id":"s08","prompt":"Count jobs by company_industry_std in UK after 2026-01-01","expected_primary_tool":"job_stats","required_filters":{"metric":"count","group_by":"company_industry_std","country":{"contains":"uk"},"posted_start":"2026-01-01"}}
+{"id":"s09","prompt":"Count jobs by platform in Netherlands after 2026-01-01","expected_primary_tool":"job_stats","required_filters":{"metric":"count","group_by":"platform","country":{"contains":"netherlands"},"posted_start":"2026-01-01"}}
+{"id":"s10","prompt":"What is the total number of jobs in Germany after 2026-01-01","expected_primary_tool":"job_stats","required_filters":{"metric":"count","country":{"contains":"germany"},"posted_start":"2026-01-01"}}
+{"id":"s11","prompt":"How many remote research jobs are in India after 2026-01-01","expected_primary_tool":"job_stats","required_filters":{"metric":"count","country":{"contains":"india"},"is_remote":true,"is_research":true,"posted_start":"2026-01-01"}}
+{"id":"s12","prompt":"Give me the monthly trend of research jobs in USA in 2026","expected_primary_tool":"job_stats","required_filters":{"metric":"count","group_by":"posted_month","country":{"contains":"usa"},"is_research":true,"posted_start":"2026-01-01","posted_end":"2026-12-31"}}
+{"id":"q01","prompt":"Show remote research jobs in Germany from January 2026","expected_primary_tool":"search_jobs","required_filters":{"country":{"contains":"germany"},"is_remote":true,"is_research":true,"posted_start":"2026-01-01","posted_end":"2026-01-31"}}
+{"id":"q02","prompt":"List full-time jobs in France posted after 2026-02-01","expected_primary_tool":"search_jobs","required_filters":{"country":{"contains":"france"},"job_type_filled":{"contains":"full-time"},"posted_start":"2026-02-01"}}
+{"id":"q03","prompt":"Find senior roles in Netherlands","expected_primary_tool":"search_jobs","required_filters":{"country":{"contains":"netherlands"},"job_level_std":{"contains":"senior"}}}
+{"id":"q04","prompt":"Find internship jobs in UK","expected_primary_tool":"search_jobs","required_filters":{"country":{"contains":"uk"},"job_type_filled":{"contains":"internship"}}}
+{"id":"q05","prompt":"Show jobs in USA on LinkedIn posted after 2026-01-01","expected_primary_tool":"search_jobs","required_filters":{"country":{"contains":"usa"},"platform":{"contains":"linkedin"},"posted_start":"2026-01-01"}}
+{"id":"q06","prompt":"Find non-research jobs in Germany","expected_primary_tool":"search_jobs","required_filters":{"country":{"contains":"germany"},"is_research":false}}
+{"id":"q07","prompt":"Find job id indeed_Germany_in-ac71aa15584565b0_5120","expected_primary_tool":"search_jobs","required_filters":{"job_id":"indeed_Germany_in-ac71aa15584565b0_5120"}}
+{"id":"q08","prompt":"Show data scientist jobs in Canada","expected_primary_tool":"search_jobs","required_filters":{"country":{"contains":"canada"}}}
+{"id":"q09","prompt":"List on-site jobs in India after 2026-01-01","expected_primary_tool":"search_jobs","required_filters":{"country":{"contains":"india"},"is_remote":false,"posted_start":"2026-01-01"}}
+{"id":"q10","prompt":"Search jobs in Australia with contract type","expected_primary_tool":"search_jobs","required_filters":{"country":{"contains":"australia"},"job_type_filled":{"contains":"contract"}}}
+{"id":"m01","prompt":"Find jobs related to stochastic optimization","expected_primary_tool":"semantic_search_jobs","required_filters":{"query_text":{"contains":"stochastic optimization"}}}
+{"id":"m02","prompt":"Show positions about container shipping forecasting","expected_primary_tool":"semantic_search_jobs","required_filters":{"query_text":{"contains":"container shipping forecasting"}}}
+{"id":"m03","prompt":"Roles that deal with NLP transformers for logistics","expected_primary_tool":"semantic_search_jobs","required_filters":{"query_text":{"contains":"nlp transformers"}}}
+{"id":"m04","prompt":"Jobs involving combinatorial optimization heuristics","expected_primary_tool":"semantic_search_jobs","required_filters":{"query_text":{"contains":"combinatorial optimization"}}}
+{"id":"m05","prompt":"Positions mentioning vehicle routing and OR-Tools","expected_primary_tool":"semantic_search_jobs","required_filters":{"query_text":{"contains":"vehicle routing"}}}
+{"id":"m06","prompt":"Find jobs similar to demand planning optimization","expected_primary_tool":"semantic_search_jobs","required_filters":{"query_text":{"contains":"demand planning optimization"}}}
+{"id":"m07","prompt":"Skills like linear programming and Pyomo","expected_primary_tool":"semantic_search_jobs","required_filters":{"query_text":{"contains":"linear programming"}}}
+{"id":"m08","prompt":"Roles about inventory optimization in supply chains","expected_primary_tool":"semantic_search_jobs","required_filters":{"query_text":{"contains":"inventory optimization"}}}
+{"id":"g1_1","conversation_group":"g1","prompt":"Find remote data science roles in Germany","expected_primary_tool":"search_jobs","expect_any_tool_call":true,"required_filters":{"country":{"contains":"germany"},"is_remote":true}}
+{"id":"g1_2","conversation_group":"g1","prompt":"give me the link of the first one","expect_any_tool_call":false,"expected_answer_contains":["job id"]}
+{"id":"g1_3","conversation_group":"g1","prompt":"tell me its job id","expect_any_tool_call":false,"expected_answer_contains":["job id"]}
+{"id":"g2_1","conversation_group":"g2","prompt":"Count jobs by country posted after 2026-01-01","expected_primary_tool":"job_stats","expect_any_tool_call":true,"required_filters":{"metric":"count","group_by":"country","posted_start":"2026-01-01"}}
+{"id":"g2_2","conversation_group":"g2","prompt":"yes","expected_primary_tool":"search_jobs","expect_any_tool_call":true}
+{"id":"g3_1","conversation_group":"g3","prompt":"Find jobs related to stochastic optimization","expected_primary_tool":"semantic_search_jobs","expect_any_tool_call":true}
+{"id":"g3_2","conversation_group":"g3","prompt":"yes","expected_primary_tool":"semantic_search_jobs","expect_any_tool_call":true}
+{"id":"g4_1","conversation_group":"g4","prompt":"Count jobs by country posted after 2026-01-01","expected_primary_tool":"job_stats","expect_any_tool_call":true}
+{"id":"g4_2","conversation_group":"g4","prompt":"no thanks","expect_any_tool_call":false,"expected_answer_contains":["let me know"]}

@@ -65,9 +65,18 @@ htmlcov/
 *.bak
 *.cache
 
+# MLflow / evaluation outputs
+mlruns/
+mlartifacts/
+mlflow.db
+mlflow.db-shm
+mlflow.db-wal
+evals/outputs/
+
 # Sensitive / credential files
 .env
 .env.*
+evals/dagshub.env
 secrets.yml
 credentials.json
 aws_credentials
@@ -104,3 +113,4 @@ DEPLOYMENT_*.md
 #   git commit -m "Add .gitignore"
 scripts/update-lambda.ps1
 run
+evals/dagshub.env.example

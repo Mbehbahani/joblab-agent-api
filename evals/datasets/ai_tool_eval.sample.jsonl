@@ -1,0 +1,4 @@
+{"id":"stats_country_after_date","prompt":"Count jobs by country posted after 2026-01-01","expected_primary_tool":"job_stats","required_filters":{"group_by":"country","metric":"count","posted_start":"2026-01-01"}}
+{"id":"list_remote_research","prompt":"Show remote research jobs in Germany from January 2026","expected_primary_tool":"search_jobs","required_filters":{"is_remote":true,"is_research":true,"country":"Germany","posted_start":"2026-01-01","posted_end":"2026-01-31"}}
+{"id":"semantic_stochastic","prompt":"Find jobs related to stochastic optimization","expected_primary_tool":"semantic_search_jobs","required_filters":{"query_text":"stochastic optimization"}}
+{"id":"job_id_lookup","prompt":"Find job id linkedin_USA_li-4371085897_66811","expected_primary_tool":"search_jobs","required_filters":{"job_id":"linkedin_USA_li-4371085897_66811"}}
