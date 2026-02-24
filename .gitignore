@@ -114,3 +114,4 @@ DEPLOYMENT_*.md
 scripts/update-lambda.ps1
 run
 evals/dagshub.env.example
+run.txt

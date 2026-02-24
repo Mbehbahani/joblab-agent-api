@@ -5,7 +5,7 @@ Copy-Item evals/dagshub.env.example evals/dagshub.env
 
 
 
-forn dagshub
+for dagshub
 # Example:
 # python evals/migrate_local_to_dagshub.py --run-id 85e697f9cd4249e08b82183db144ef63
 # 
