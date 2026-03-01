@@ -72,10 +72,29 @@ mlflow.db
 mlflow.db-shm
 mlflow.db-wal
 evals/outputs/
+evals/results/
+
+# Build / packaging artifacts
+package/
+*.backup
+
+# Scratch / debug / one-off files
+response.txt
+run.txt
+bedrock_trace.py
+
+# Deprecated docs (kept in git history)
+DEPLOYMENT_STATUS.md
+DEPLOYMENT_SUCCESS.md
+DEPLOYMENT_GUIDE.md
+scripts/SCRIPTS_UPDATE_SUMMARY.md
+scripts/DEPLOYMENT_LESSONS.md
+scripts/deploy.ps1.backup
+scripts/README2.md
 
 # Sensitive / credential files
 .env
-.env.*
+.env.example
 evals/dagshub.env
 secrets.yml
 credentials.json
@@ -115,3 +134,4 @@ scripts/update-lambda.ps1
 run
 evals/dagshub.env.example
 run.txt
+evals

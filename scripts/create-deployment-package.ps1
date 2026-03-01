@@ -8,6 +8,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# In PowerShell 7+, native stderr can be promoted to terminating errors.
+# pip emits non-fatal dependency warnings on stderr, so disable this behavior
+# for the packaging script and rely on $LASTEXITCODE instead.
+if ($PSVersionTable.PSVersion.Major -ge 7) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 
 Write-Host "====================================================" -ForegroundColor Cyan
 Write-Host "  Creating Lambda Deployment Package" -ForegroundColor Cyan
@@ -27,18 +33,42 @@ if (Test-Path $PackageDir) {
 New-Item -ItemType Directory -Path $PackageDir | Out-Null
 
 # Install dependencies
+# Prefer requirements-lambda.txt (lighter, excludes dev-only packages like mlflow)
+$ReqFile = Join-Path $LambdaDir "requirements-lambda.txt"
+if (-not (Test-Path $ReqFile)) {
+    $ReqFile = Join-Path $LambdaDir "requirements.txt"
+}
 Write-Host "[2/5] Installing dependencies (Linux compatible)..." -ForegroundColor Yellow
+Write-Host "   Requirements: $(Split-Path $ReqFile -Leaf)" -ForegroundColor Gray
 Write-Host "   Using manylinux2014_x86_64 platform for Lambda compatibility" -ForegroundColor Gray
 
 # Install Linux-compatible wheels for Lambda (Amazon Linux runtime)
-python -m pip install -r (Join-Path $LambdaDir "requirements.txt") `
-    -t $PackageDir `
-    --platform manylinux2014_x86_64 `
-    --only-binary=:all: `
-    --upgrade `
-    --quiet
+# NOTE: pip may warn about conflicts with OTHER packages installed in the current
+# venv (e.g. python-jobspy from SupaBackend). These warnings are harmless because
+# requirements-lambda.txt only installs exactly what Lambda needs.
+$PrevErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    $PipOutput = python -m pip install -r $ReqFile `
+        -t $PackageDir `
+        --platform manylinux2014_x86_64 `
+        --only-binary=:all: `
+        --upgrade `
+        --quiet 2>&1
+} finally {
+    $ErrorActionPreference = $PrevErrorActionPreference
+}
 
-if ($LASTEXITCODE -ne 0) {
+$ExitCode = $LASTEXITCODE
+
+# Print output, suppressing noisy cross-project dependency conflict warnings
+$PipOutput | Where-Object {
+    $_ -notmatch "dependency conflicts" -and
+    $_ -notmatch "python-jobspy" -and
+    $_ -notmatch "incompatible"
+} | ForEach-Object { Write-Host $_ }
+
+if ($ExitCode -ne 0) {
     Write-Host "ERROR: Failed to install dependencies" -ForegroundColor Red
     Write-Host "Ensure pip >= 20.3 for --platform support" -ForegroundColor Yellow
     exit 1

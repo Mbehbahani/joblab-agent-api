@@ -5,6 +5,7 @@ All queries use the PostgREST API with parameterized query-string filters.
 NO raw SQL is ever sent. The service_role key is used server-side only.
 """
 
+import json
 import logging
 from typing import Any
 
@@ -15,6 +16,23 @@ from app.schemas.tools import SAFE_COLUMNS, JobStatsInput, SearchJobsInput, Sema
 from app.services.embeddings import embed_text
 
 logger = logging.getLogger(__name__)
+
+# ── MLflow availability ─────────────────────────────────────────────────────
+
+_mlflow = None
+_SpanType = None
+try:
+    import mlflow as _mlflow
+    from mlflow.entities import SpanType as _SpanType
+except ImportError:
+    pass
+
+
+def _tool_trace(func):
+    """Conditionally apply @mlflow.trace(span_type=SpanType.TOOL) if MLflow is available."""
+    if _mlflow and _SpanType:
+        return _mlflow.trace(span_type=_SpanType.TOOL)(func)
+    return func
 
 
 def _headers() -> dict[str, str]:
@@ -69,6 +87,7 @@ def _apply_common_filters(
 
 # Tool: search_jobs
 
+@_tool_trace
 def execute_search_jobs(raw_input: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Build a PostgREST query from validated filters and return matching rows.
@@ -113,6 +132,20 @@ def execute_search_jobs(raw_input: dict[str, Any]) -> list[dict[str, Any]]:
     resp.raise_for_status()
     rows: list[dict[str, Any]] = resp.json()
     logger.info("search_jobs  returned %d rows", len(rows))
+
+    # ── MLflow span enrichment ──────────────────────────────────────────
+    if _mlflow:
+        try:
+            span = _mlflow.get_current_active_span()
+            if span:
+                span.set_attributes({
+                    "tool.search_jobs.result_count": len(rows),
+                    "tool.search_jobs.filters": json.dumps({k: v for k, v in qs.items() if k not in ('select', 'order', 'limit')}),
+                    "tool.search_jobs.limit": params.limit,
+                })
+        except Exception:
+            pass
+
     return rows
 
 
@@ -150,6 +183,7 @@ def _paginated_fetch(
     return all_rows
 
 
+@_tool_trace
 def execute_job_stats(raw_input: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Aggregate job counts grouped by a whitelisted column.
@@ -261,11 +295,27 @@ def execute_job_stats(raw_input: dict[str, Any]) -> list[dict[str, Any]]:
     )[:25]
 
     logger.info("job_stats  groups=%d  total_rows=%d", len(result), len(rows))
+
+    # ── MLflow span enrichment ──────────────────────────────────────────
+    if _mlflow:
+        try:
+            span = _mlflow.get_current_active_span()
+            if span:
+                span.set_attributes({
+                    "tool.job_stats.group_by": params.group_by,
+                    "tool.job_stats.metric": params.metric,
+                    "tool.job_stats.total_rows": len(rows),
+                    "tool.job_stats.groups_returned": len(result),
+                })
+        except Exception:
+            pass
+
     return result
 
 
 # Tool: semantic_search_jobs
 
+@_tool_trace
 def execute_semantic_search(raw_input: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Semantic similarity search across job description chunks.
@@ -375,140 +425,170 @@ def execute_semantic_search(raw_input: dict[str, Any]) -> list[dict[str, Any]]:
         total_elapsed,
     )
 
+    # ── MLflow span enrichment ──────────────────────────────────────────
+    if _mlflow:
+        try:
+            span = _mlflow.get_current_active_span()
+            if span:
+                top_similarity = results[0]["similarity"] if results else 0.0
+                span.set_attributes({
+                    "tool.semantic_search.query": params.query_text[:200],
+                    "tool.semantic_search.top_k": params.top_k,
+                    "tool.semantic_search.result_count": len(results),
+                    "tool.semantic_search.top_similarity": top_similarity,
+                    "tool.semantic_search.embed_latency_s": embed_elapsed,
+                    "tool.semantic_search.total_latency_s": total_elapsed,
+                    "tool.semantic_search.expired_filtered": len(seen_job_ids) - len(results) + (len(rows) - len(seen_job_ids)),
+                })
+        except Exception:
+            pass
+
     return results
 
 
 # Tool registry
 
-# Claude tool schemas (Anthropic Messages API format)
+# Bedrock Converse API tool definitions (toolSpec format)
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
-        "name": "search_jobs",
-        "description": (
-            "Search the jobs database using structured filters. "
-            "Returns matching job listings with key fields. "
-            "Use this when users ask to list, show, find, or search for specific jobs."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "job_id": {
-                    "type": "string",
-                    "description": "Exact job_id to look up (e.g. linkedin_USA_li-4371085897_66811 or indeed_Germany_in-ac71aa15584565b0_5120). Use this when the user provides a job ID directly.",
+        "toolSpec": {
+            "name": "search_jobs",
+            "description": (
+                "Search the jobs database using structured filters. "
+                "Returns matching job listings with key fields. "
+                "Use this when users ask to list, show, find, or search for specific jobs."
+            ),
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {
+                            "type": "string",
+                            "description": "Exact job_id to look up (e.g. linkedin_USA_li-4371085897_66811 or indeed_Germany_in-ac71aa15584565b0_5120). Use this when the user provides a job ID directly.",
+                        },
+                        "role_keyword": {
+                            "type": "string",
+                            "description": "Search keyword to filter by position name/title (e.g. Data Scientist, Software Engineer, Product Manager). Matched against the actual_role column.",
+                        },
+                        "country": {
+                            "type": "string",
+                            "description": "Country name filter (e.g. Germany, Sweden, USA). Matched with case-insensitive partial match.",
+                        },
+                        "is_remote": {"type": "boolean", "description": "Filter for remote jobs only (true) or non-remote only (false)"},
+                        "is_research": {"type": "boolean", "description": "Filter for research positions only (true) or non-research only (false)"},
+                        "job_level_std": {
+                            "type": "string",
+                            "description": "Standardised seniority level (e.g. Junior, Mid, Senior, Lead, Manager, Director)",
+                        },
+                        "job_function_std": {
+                            "type": "string",
+                            "description": "Standardised job function category (e.g. Engineering, Data Science, Marketing, Sales, Design, Product, Finance, HR, Operations)",
+                        },
+                        "company_industry_std": {
+                            "type": "string",
+                            "description": "Standardised company industry (e.g. Technology, Finance, Healthcare, Education, Retail)",
+                        },
+                        "job_type_filled": {
+                            "type": "string",
+                            "description": "Employment type (e.g. Full-time, Part-time, Contract, Internship)",
+                        },
+                        "platform": {
+                            "type": "string",
+                            "description": "Job platform source (e.g. LinkedIn, Indeed, Glassdoor)",
+                        },
+                        "posted_start": {
+                            "type": "string",
+                            "description": "ISO date YYYY-MM-DD – return jobs posted on or after this date (inclusive)",
+                        },
+                        "posted_end": {
+                            "type": "string",
+                            "description": "ISO date YYYY-MM-DD – return jobs posted on or before this date (inclusive)",
+                        },
+                        "limit": {"type": "integer", "description": "Max results to return (default 20, max 100)"},
+                    },
                 },
-                "role_keyword": {
-                    "type": "string",
-                    "description": "Search keyword to filter by position name/title (e.g. Data Scientist, Software Engineer, Product Manager). Matched against the actual_role column.",
-                },
-                "country": {
-                    "type": "string",
-                    "description": "Country name filter (e.g. Germany, Sweden, USA). Matched with case-insensitive partial match.",
-                },
-                "is_remote": {"type": "boolean", "description": "Filter for remote jobs only (true) or non-remote only (false)"},
-                "is_research": {"type": "boolean", "description": "Filter for research positions only (true) or non-research only (false)"},
-                "job_level_std": {
-                    "type": "string",
-                    "description": "Standardised seniority level (e.g. Junior, Mid, Senior, Lead, Manager, Director)",
-                },
-                "job_function_std": {
-                    "type": "string",
-                    "description": "Standardised job function category (e.g. Engineering, Data Science, Marketing, Sales, Design, Product, Finance, HR, Operations)",
-                },
-                "company_industry_std": {
-                    "type": "string",
-                    "description": "Standardised company industry (e.g. Technology, Finance, Healthcare, Education, Retail)",
-                },
-                "job_type_filled": {
-                    "type": "string",
-                    "description": "Employment type (e.g. Full-time, Part-time, Contract, Internship)",
-                },
-                "platform": {
-                    "type": "string",
-                    "description": "Job platform source (e.g. LinkedIn, Indeed, Glassdoor)",
-                },
-                "posted_start": {
-                    "type": "string",
-                    "description": "ISO date YYYY-MM-DD – return jobs posted on or after this date (inclusive)",
-                },
-                "posted_end": {
-                    "type": "string",
-                    "description": "ISO date YYYY-MM-DD – return jobs posted on or before this date (inclusive)",
-                },
-                "limit": {"type": "integer", "description": "Max results to return (default 20, max 100)"},
             },
         },
     },
     {
-        "name": "job_stats",
-        "description": (
-            "Get aggregated job statistics (counts) grouped by a dimension. "
-            "Use this for questions about totals, trends over time, distributions, "
-            "or comparisons across categories."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "metric": {
-                    "type": "string",
-                    "enum": ["count"],
-                    "description": "Aggregation metric (currently only count is supported)",
-                },
-                "group_by": {
-                    "type": "string",
-                    "enum": [
-                        "country",
-                        "company_name",
-                        "job_level_std",
-                        "job_function_std",
-                        "company_industry_std",
-                        "job_type_filled",
-                        "platform",
-                        "posted_month",
-                    ],
-                    "description": "Dimension to group results by. Use posted_month for time-series / trend analysis.",
-                },
-                "country": {"type": "string", "description": "Optional country filter (e.g. Germany, Sweden)"},
-                "is_remote": {"type": "boolean", "description": "Optional remote filter"},
-                "is_research": {"type": "boolean", "description": "Optional research filter"},
-                "job_type_filled": {
-                    "type": "string",
-                    "description": "Optional employment type filter (e.g. Full-time, Part-time, Contract, Internship)",
-                },
-                "posted_start": {
-                    "type": "string",
-                    "description": "ISO date YYYY-MM-DD – count jobs posted on or after this date",
-                },
-                "posted_end": {
-                    "type": "string",
-                    "description": "ISO date YYYY-MM-DD – count jobs posted on or before this date",
+        "toolSpec": {
+            "name": "job_stats",
+            "description": (
+                "Get aggregated job statistics (counts) grouped by a dimension. "
+                "Use this for questions about totals, trends over time, distributions, "
+                "or comparisons across categories."
+            ),
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "metric": {
+                            "type": "string",
+                            "enum": ["count"],
+                            "description": "Aggregation metric (currently only count is supported)",
+                        },
+                        "group_by": {
+                            "type": "string",
+                            "enum": [
+                                "country",
+                                "company_name",
+                                "job_level_std",
+                                "job_function_std",
+                                "company_industry_std",
+                                "job_type_filled",
+                                "platform",
+                                "posted_month",
+                            ],
+                            "description": "Dimension to group results by. Use posted_month for time-series / trend analysis.",
+                        },
+                        "country": {"type": "string", "description": "Optional country filter (e.g. Germany, Sweden)"},
+                        "is_remote": {"type": "boolean", "description": "Optional remote filter"},
+                        "is_research": {"type": "boolean", "description": "Optional research filter"},
+                        "job_type_filled": {
+                            "type": "string",
+                            "description": "Optional employment type filter (e.g. Full-time, Part-time, Contract, Internship)",
+                        },
+                        "posted_start": {
+                            "type": "string",
+                            "description": "ISO date YYYY-MM-DD – count jobs posted on or after this date",
+                        },
+                        "posted_end": {
+                            "type": "string",
+                            "description": "ISO date YYYY-MM-DD – count jobs posted on or before this date",
+                        },
+                    },
+                    "required": ["metric", "group_by"],
                 },
             },
-            "required": ["metric", "group_by"],
         },
     },
     {
-        "name": "semantic_search_jobs",
-        "description": (
-            "Semantic similarity search across job descriptions using vector embeddings. "
-            "Use this when users ask about concepts, topics, or skills that require "
-            "meaning-based matching rather than exact keyword filters. "
-            "For example: 'jobs related to stochastic optimization', "
-            "'positions about container shipping forecasting', "
-            "'roles involving NLP and transformers'."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query_text": {
-                    "type": "string",
-                    "description": "The natural language query to search for semantically similar job descriptions.",
-                },
-                "top_k": {
-                    "type": "integer",
-                    "description": "Number of most similar results to return (default 5, max 20).",
+        "toolSpec": {
+            "name": "semantic_search_jobs",
+            "description": (
+                "Semantic similarity search across job descriptions using vector embeddings. "
+                "Use this when users ask about concepts, topics, or skills that require "
+                "meaning-based matching rather than exact keyword filters. "
+                "For example: 'jobs related to stochastic optimization', "
+                "'positions about container shipping forecasting', "
+                "'roles involving NLP and transformers'."
+            ),
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "query_text": {
+                            "type": "string",
+                            "description": "The natural language query to search for semantically similar job descriptions.",
+                        },
+                        "top_k": {
+                            "type": "integer",
+                            "description": "Number of most similar results to return (default 5, max 20).",
+                        },
+                    },
+                    "required": ["query_text"],
                 },
             },
-            "required": ["query_text"],
         },
     },
 ]

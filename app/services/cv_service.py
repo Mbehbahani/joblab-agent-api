@@ -4,10 +4,10 @@ CV matching service – orchestrates the full CV-to-job matching flow.
 Flow:
   1. Normalize CV text
   2. Generate 512-dim embedding (Bedrock Titan V2 - reuses existing service)
-  3. Insert CV + embedding into Railway PostgreSQL
+  3. Insert CV + embedding into S3 (joblab-cv-store bucket)
   4. Perform vector similarity search on Supabase job_chunks (via RPC)
   5. Enrich matches with job metadata from Supabase jobs table
-  6. Store top matches in Railway user_cvs.top_matches
+  6. Store top matches back in S3
   7. Return structured response
 """
 
@@ -22,7 +22,7 @@ from PyPDF2 import PdfReader
 from app.config import get_settings
 from app.schemas.cv_match import CVMatchResponse, JobMatch
 from app.services.embeddings import embed_text
-from app.services.railway_db import insert_cv, update_matches
+from app.services.s3_cv_store import insert_cv, update_matches
 
 logger = logging.getLogger(__name__)
 
@@ -139,9 +139,9 @@ def match_cv(
     embed_elapsed = round(time.time() - start, 3)
     logger.info("CV embedding generated  dims=%d  time=%.3fs", len(embedding), embed_elapsed)
 
-    # Step 3 — Insert CV into Railway PostgreSQL
+    # Step 3 — Insert CV into S3
     cv_id = insert_cv(cv_text, embedding)
-    logger.info("CV stored in Railway  cv_id=%s", cv_id)
+    logger.info("CV stored in S3  cv_id=%s", cv_id)
 
     # Step 4 — Vector similarity search on Supabase job_chunks via RPC
     settings = get_settings()
@@ -316,7 +316,7 @@ def match_cv(
             "similarity": similarity,
         })
 
-    # Step 7 — Store matches in Railway
+    # Step 7 — Store matches in S3
     update_matches(cv_id, matches_json)
     logger.info("CV matching completed  cv_id=%s  matches=%d", cv_id, len(matches))
 

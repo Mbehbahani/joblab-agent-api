@@ -1,22 +1,44 @@
 ﻿"""
 AI router - exposes Bedrock-backed endpoints.
 Supports Claude tool calling for structured Supabase queries.
+
+Architecture: Policy / Execution / Evaluation separation
+  - prompt_policy.py  -> composable system prompt (testable, swappable)
+  - confidence_gate.py -> ANSWER/ASK_CLARIFICATION/DECLINE/HANDOFF state machine
+  - turn_logger.py     -> per-turn tracing with MLflow + structured logging
+
+MLflow Tracing:
+  - Each /ai/ask call creates a parent trace span
+  - Child spans: LLM inference, tool execution, confidence gate
+  - Autolog (from main.py) also traces raw boto3 calls
 """
 
 import json
 import logging
 import uuid
+import time
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Header
 
 from app.config import get_settings
-from app.schemas.ai import AskRequest, AskResponse, ErrorResponse
+from app.schemas.ai import (
+    AskRequest,
+    AskResponse,
+    ErrorResponse,
+    FeedbackRequest,
+    FeedbackResponse,
+    MlflowFlushRequest,
+    MlflowFlushResponse,
+)
 from app.services.bedrock import (
     invoke_claude,
     extract_text,
     extract_tool_calls,
     has_tool_use,
+    get_assistant_message,
+    get_usage,
+    make_tool_result_block,
 )
 from app.services.joblab_tools import TOOL_DEFINITIONS, TOOL_EXECUTORS
 from app.services.conversation_memory import (
@@ -28,210 +50,44 @@ from app.services.conversation_memory import (
     set_mentioned_jobs,
     get_mentioned_jobs,
 )
+from app.services.prompt_policy import (
+    get_system_prompt,
+    DEFAULT_POLICY,
+    POLICY_VERSION,
+)
+from app.services.confidence_gate import (
+    evaluate_confidence,
+    track_confidence,
+    get_consecutive_low_confidence,
+    GateOutcome,
+)
+from app.services.turn_logger import (
+    TurnRecord,
+    TurnTimer,
+    log_turn,
+    update_aggregate_metrics,
+    get_aggregate_metrics,
+)
 
 logger = logging.getLogger(__name__)
 
+# ── MLflow availability ─────────────────────────────────────────────────────
+_mlflow = None
+_SpanType = None
+try:
+    import mlflow as _mlflow
+    from mlflow.entities import SpanType as _SpanType
+except ImportError:
+    pass
+
+
 router = APIRouter(prefix="/ai", tags=["ai"])
 
+# ── System prompt from policy layer (replaces monolithic string) ────────────
+# The prompt is now composed from discrete, testable sections.
+# See app/services/prompt_policy.py for the full policy.
+JOBLAB_SYSTEM = get_system_prompt(DEFAULT_POLICY)
 
-JOBLAB_SYSTEM = """
-You are JobLab GenAI — a deterministic analytics assistant connected to a structured jobs database.
-
-You operate under strict rules.
-
-────────────────────────
-1. DATABASE ENFORCEMENT
-────────────────────────
-If a user question involves:
-- job listings
-- job counts
-- trends
-- comparisons
-- filters (country, date, remote, level, platform, research)
-- specific job titles
-
-You MUST call a tool.
-You are NOT allowed to answer from memory.
-You must never fabricate numbers.
-
-Only answer directly if the question is unrelated to the jobs database.
-
-────────────────────────
-2. TOOL SELECTION RULES
-────────────────────────
-If the question contains:
-- "how many"
-- "count"
-- "number of"
-- "total"
-- "percentage"
-- "distribution"
-
-→ Use job_stats with metric="count".
-
-If the user wants listings:
-- "show"
-- "list"
-- "find"
-- "search"
-- or asks about specific position names
-
-→ Use search_jobs.
-
-If the user provides a specific job_id string (e.g. "linkedin_USA_li-4371085897_66811"
-or "indeed_Germany_in-ac71aa15584565b0_5120"):
-→ Use search_jobs with job_id parameter for an exact lookup.
-
-If the user asks about trends or changes:
-→ Use job_stats with appropriate grouping.
-
-If user mentions:
-- trend
-- increase
-- decrease
-- growth
-- decline
-- month-over-month
-- comparison
-- compare
-- change
-
-→ Use job_stats with group_by="posted_month".
-
-────────────────────────
-2a. SEMANTIC SEARCH RULES
-────────────────────────
-If the user question contains concept-level or meaning-based language such as:
-- "related to"
-- "about"
-- "similar to"
-- "positions mentioning"
-- "jobs involving"
-- "skills like"
-- "roles that deal with"
-- abstract topics, techniques, or domain concepts (e.g. "stochastic optimization", "container shipping forecasting", "NLP transformers")
-
-→ You MUST call semantic_search_jobs.
-
-semantic_search_jobs performs vector similarity search across job descriptions.
-It finds jobs by meaning, not exact keyword match.
-
-Do NOT combine semantic_search_jobs with search_jobs or job_stats in the same call.
-Use only ONE tool type per request.
-
-When presenting semantic search results:
-- Summarize the matched job descriptions concisely.
-- Mention the similarity score qualitatively (e.g. "highly relevant", "moderately related").
-- Do not expose raw similarity numbers or vectors to the user.
-
-Never mix tools unless necessary.
-
-────────────────────────
-3. AVAILABLE FILTERS
-────────────────────────
-You can filter by:
-- country: actual country name (e.g. Germany, USA)
-- is_remote: true/false for remote work
-- is_research: true/false for research positions
-- job_level_std: seniority (Junior, Mid, Senior, Lead, Manager, Director)
-- job_function_std: function (Engineering, Data Science, Marketing, etc.)
-- company_industry_std: industry (Technology, etc.)
-- job_type_filled: employment type (Full-time, Part-time, Contract, Internship)
-- platform: job source (LinkedIn and Indeed)
-- posted_start / posted_end: ISO date boundaries
-- role_keyword: free text match on job title (search_jobs only)
-
-For job_stats you can group_by:
-country, company_name, job_level_std, job_function_std, company_industry_std, job_type_filled, platform, posted_month
-
-────────────────────────
-4. TEMPORAL RULES (current database has been started from 2026-01-01)
-────────────────────────
-If the user specifies:
-- a month + year (e.g., February 2026)
-- a year
-- a date range
-- "after <date>"
-- "before <date>"
-
-You MUST convert it into ISO boundaries using:
-posted_start and/or posted_end.
-
-Example:
-January 2026 →
-posted_start = 2026-01-01
-posted_end = 2026-01-31
-
-Never ignore temporal constraints.
-
-────────────────────────
-5. STRICT DATA POLICY
-────────────────────────
-- Never hallucinate numbers.
-- Never approximate.
-- Never assume.
-- Always rely strictly on tool output.
-- Never drop an explicit user filter (country, research, remote, date, platform, level).
-- If user asks for research positions, pass is_research=true.
-- If user asks about remote jobs, pass is_remote=true.
-- If user asks about a specific country, pass the country name directly (e.g. country="Germany").
-- The database has real country names stored in the country column. Use the actual country name.
-- If user mentions employment type (full-time, part-time, contract, internship), pass job_type_filled.
-- If zero → say zero.
-- If empty → say no data found.
-
-────────────────────────
-5a. MINIMAL FILTER POLICY
-────────────────────────
-- ONLY apply filters the user explicitly mentions.
-- NEVER add extra filters the user did not ask for.
-- If user says "count jobs by country posted after 2026-01-01", use ONLY group_by="country" and posted_start="2026-01-01". Do NOT add is_remote, is_research, job_level_std, job_function_std, platform, or any other filter unless the user explicitly asked for it.
-- Adding unnecessary filters reduces the result set and produces incorrect counts.
-- When unsure whether a filter is needed, do NOT include it.
-
-────────────────────────
-6. RESPONSE STYLE
-────────────────────────
-After receiving tool results:
-- Provide a concise answer.
-- Do not expose raw JSON.
-- Offer optional follow-up filters.
-- Remain analytical, not conversational.
-- When grouped monthly data includes delta and percent_change, interpret trend direction.
-- Mention increase/decrease magnitude concisely.
-- Do not hallucinate beyond provided data.
-
-When presenting individual job results (from search_jobs or semantic_search_jobs):
-- ALWAYS include the job_id for every job you mention.
-- ALWAYS include the URL (link) if available.
-- Present job details in a structured, scannable format.
-- Example format:
-  1. **Data Scientist** at Google (Amsterdam, NL)
-     - Level: Senior | Type: Full-time | Posted: 2026-02-10
-     - Job ID: abc-123
-     - Link: https://linkedin.com/...
-
-────────────────────────
-7. CONVERSATION MEMORY RULES
-────────────────────────
-If the user provides a short follow-up instruction (e.g. "only remote", "now Germany", "senior only"),
-interpret it as a refinement of the previous tool call.
-Modify previous filters accordingly instead of starting a new unrelated query.
-
-If the user asks for details about a specific job mentioned earlier (e.g. "tell me its job id",
-"give me the link", "more about the first one", "details on the Mendix job"):
-- Look at the [Previously mentioned jobs] context provided to you.
-- ALWAYS include the job_id and url in your response.
-- If multiple jobs were mentioned, identify the one the user is referring to.
-
-────────────────────────
-8. FOLLOW-UP CONFIRMATION RULES
-────────────────────────
-If you offer additional analysis or breakdown and the user responds with an affirmative answer
-(e.g., "yes", "sure", "please"), interpret it as a confirmation to expand the previous query.
-Provide a more detailed breakdown by calling the appropriate tool with additional grouping.
-Never refuse an affirmative follow-up. Always interpret it as wanting more detail on the previous query.
-"""
 
 MAX_TOOL_ROUNDS = 5  # safety: prevent infinite tool loops
 MAX_SOFT_ENFORCEMENT_RETRIES = 2
@@ -452,28 +308,228 @@ def _build_followup_args(tool_name: str, tool_args: dict) -> tuple[str, dict]:
 )
 async def ask(body: AskRequest):
     """
-    1. Check for pending follow-up confirmations (yes/no).
-    2. Send the user prompt + tool definitions to Claude.
-    3. If Claude responds with tool_use -> execute, append result, re-call.
-    4. Repeat until Claude returns a final text answer (up to MAX_TOOL_ROUNDS).
-    5. After response, set pending follow-up if assistant offered one.
+    Agent orchestration loop with confidence gating and per-turn logging.
+
+    Flow:
+      1. Check for pending follow-up confirmations (yes/no).
+      2. Send the user prompt + tool definitions to Claude.
+      3. If Claude responds with tool_use -> execute, evaluate confidence, re-call.
+      4. Repeat until Claude returns a final text answer (up to MAX_TOOL_ROUNDS).
+      5. Log the full turn (structured + MLflow).
+      6. Apply confidence gate (ANSWER / ASK_CLARIFICATION / DECLINE / HANDOFF).
     """
     settings = get_settings()
 
-    # Ensure conversation_id exists
+    # ── Initialize turn tracking (must be before MLflow so conversation_id exists) ──
+    turn_id = str(uuid.uuid4())
     conversation_id = body.conversation_id or str(uuid.uuid4())
+    timer = TurnTimer()
+    timer.start()
+
+    # ── MLflow Lite trace fallback (when full SDK is unavailable) ──────
+    _lite_client = None
+    _lite_trace_events: list[dict[str, Any]] = []
+
+    # ── MLflow: create a root AGENT trace for the full orchestration ────
+    _agent_span = None
+    _agent_span_ctx = None
+    _trace_id = None
+    if _mlflow and _SpanType:
+        try:
+            # MLflow 3.x: start_span returns a context manager;
+            # we call __enter__ manually so the span stays open across
+            # the whole function and is closed in _finalize_turn.
+            _agent_span_ctx = _mlflow.start_span(
+                name="ask_agent",
+                span_type=_SpanType.AGENT,
+            )
+            _agent_span = _agent_span_ctx.__enter__()
+            _agent_span.set_inputs({
+                "prompt": body.prompt,
+                "conversation_id": conversation_id,
+            })
+            _trace_id = _agent_span.trace_id
+            # Attach session + user metadata so traces are queryable
+            _mlflow.update_current_trace(
+                metadata={
+                    "mlflow.trace.session": conversation_id,
+                },
+                tags={
+                    "conversation_id": conversation_id,
+                    "prompt_preview": body.prompt[:120],
+                },
+            )
+        except Exception as _exc:
+            logger.debug("MLflow span creation failed: %s", _exc)
+            _agent_span = None
+            _agent_span_ctx = None
+
+    # If full MLflow tracing is unavailable, use REST trace fallback.
+    if _trace_id is None:
+        try:
+            from app.services.mlflow_lite import get_lite_client
+
+            _lite_client = get_lite_client()
+            if _lite_client:
+                _trace_id = _lite_client.start_trace(
+                    prompt=body.prompt,
+                    conversation_id=conversation_id,
+                    turn_id=turn_id,
+                    policy_version=POLICY_VERSION,
+                    trace_name="ask_agent_lite",
+                )
+                if _trace_id:
+                    _lite_trace_events.append(
+                        {
+                            "ts_ms": int(time.time() * 1000),
+                            "kind": "trace_start",
+                            "payload": {"trace_id": _trace_id},
+                        }
+                    )
+        except Exception as _exc:
+            logger.debug("MLflow Lite trace start failed: %s", _exc)
+
+    turn_record = TurnRecord(
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        user_prompt=body.prompt,
+        prompt_char_count=len(body.prompt),
+        policy_version=POLICY_VERSION,
+        system_prompt_chars=len(JOBLAB_SYSTEM),
+    )
+
+    def _lite_append_event(kind: str, payload: dict[str, Any]) -> None:
+        """Collect compact trace events for MLflow Lite timeline tags."""
+        if not (_lite_client and _trace_id):
+            return
+        try:
+            _lite_trace_events.append(
+                {
+                    "ts_ms": int(time.time() * 1000),
+                    "kind": kind,
+                    "payload": payload,
+                }
+            )
+        except Exception:
+            pass
+
+    def _finalize_turn(
+        answer: str,
+        usage: dict | None,
+        tool_calls: list[dict] | None,
+        gate_outcome: str = "ANSWER",
+        gate_confidence: float = 1.0,
+        gate_reason: str = "",
+        result_type: str = "answer",
+        error: str | None = None,
+    ) -> AskResponse:
+        """Helper: finalize turn record, log, and return response."""
+        turn_record.total_latency_ms = round(timer.total_ms(), 1)
+        turn_record.llm_latency_ms = timer.get("llm")
+        turn_record.tool_latency_ms = timer.get("tool")
+        turn_record.gate_outcome = gate_outcome
+        turn_record.gate_confidence = gate_confidence
+        turn_record.gate_reason = gate_reason
+        turn_record.result_type = result_type
+        turn_record.result_length = len(answer)
+        turn_record.error = error
+        if usage:
+            turn_record.input_tokens = usage.get("input_tokens", 0)
+            turn_record.output_tokens = usage.get("output_tokens", 0)
+            turn_record.total_tokens = (
+                turn_record.input_tokens + turn_record.output_tokens
+            )
+
+        # Finalize MLflow Lite trace (if active)
+        if _lite_client and _trace_id:
+            try:
+                _lite_client.end_trace(
+                    trace_id=_trace_id,
+                    status="ERROR" if error else "OK",
+                    answer=answer,
+                    usage={
+                        "input_tokens": turn_record.input_tokens,
+                        "output_tokens": turn_record.output_tokens,
+                        "total_tokens": turn_record.total_tokens,
+                    },
+                    gate_outcome=gate_outcome,
+                    gate_confidence=gate_confidence,
+                    gate_reason=gate_reason,
+                    result_type=result_type,
+                    error=error,
+                    timeline=_lite_trace_events,
+                    tags={
+                        "tool_calls_count": len(tool_calls or []),
+                        "tool_rounds": turn_record.tool_rounds,
+                        "soft_enforcement_retries": turn_record.soft_enforcement_retries,
+                    },
+                )
+            except Exception as _exc:
+                logger.debug("MLflow Lite trace end failed: %s", _exc)
+        elif _lite_client and not _trace_id:
+            try:
+                _lite_client.spool_trace_complete(
+                    prompt=body.prompt,
+                    conversation_id=conversation_id,
+                    turn_id=turn_id,
+                    policy_version=POLICY_VERSION,
+                    answer=answer,
+                    usage={
+                        "input_tokens": turn_record.input_tokens,
+                        "output_tokens": turn_record.output_tokens,
+                        "total_tokens": turn_record.total_tokens,
+                    },
+                    gate_outcome=gate_outcome,
+                    gate_confidence=gate_confidence,
+                    gate_reason=gate_reason,
+                    result_type=result_type,
+                    error=error,
+                    timeline=_lite_trace_events,
+                    tags={
+                        "tool_calls_count": len(tool_calls or []),
+                        "tool_rounds": turn_record.tool_rounds,
+                        "soft_enforcement_retries": turn_record.soft_enforcement_retries,
+                    },
+                )
+            except Exception as _exc:
+                logger.debug("MLflow Lite trace spool failed: %s", _exc)
+
+        # Log turn (structured + MLflow if available)
+        log_turn(turn_record)
+        update_aggregate_metrics(turn_record)
+
+        # Close the AGENT span with outputs
+        if _agent_span and _agent_span_ctx:
+            try:
+                _agent_span.set_outputs({
+                    "answer": answer[:500],
+                    "gate_outcome": gate_outcome,
+                    "gate_confidence": gate_confidence,
+                    "tool_calls_count": len(tool_calls) if tool_calls else 0,
+                })
+                _agent_span_ctx.__exit__(None, None, None)
+            except Exception:
+                pass
+
+        return AskResponse(
+            answer=answer,
+            model=settings.bedrock_model_id,
+            usage=usage,
+            tool_calls=tool_calls or None,
+            conversation_id=conversation_id,
+            trace_id=_trace_id,
+        )
 
     # ── Dialogue state: handle affirmative/negative follow-ups ──────────
     pending = get_pending_followup(conversation_id)
 
     if pending and _is_negative_followup(body.prompt):
         clear_pending_followup(conversation_id)
-        return AskResponse(
+        return _finalize_turn(
             answer="Alright. Let me know if you'd like additional insights.",
-            model=settings.bedrock_model_id,
             usage=None,
             tool_calls=None,
-            conversation_id=conversation_id,
+            result_type="followup_declined",
         )
 
     if pending and _is_affirmative_followup(body.prompt):
@@ -490,26 +546,59 @@ async def ask(body: AskRequest):
 
         executor = TOOL_EXECUTORS.get(exec_tool_name)
         if executor is None:
-            return AskResponse(
+            return _finalize_turn(
                 answer=f"Unknown tool: {exec_tool_name}",
-                model=settings.bedrock_model_id,
                 usage=None,
                 tool_calls=None,
-                conversation_id=conversation_id,
+                gate_outcome="DECLINE",
+                gate_confidence=0.0,
+                gate_reason=f"Unknown tool: {exec_tool_name}",
+                result_type="error",
+                error=f"Unknown tool: {exec_tool_name}",
             )
 
-        try:
-            result_data = executor(exec_tool_args)
-            result_json = json.dumps(result_data, default=str)
-        except Exception as exc:
-            logger.exception("Follow-up tool %s failed", exec_tool_name)
-            return AskResponse(
-                answer=f"Tool execution failed: {exc}",
-                model=settings.bedrock_model_id,
+        tool_error = None
+        result_data = None
+        with timer.track("tool"):
+            try:
+                result_data = executor(exec_tool_args)
+                result_json = json.dumps(result_data, default=str)
+            except Exception as exc:
+                logger.exception("Follow-up tool %s failed", exec_tool_name)
+                tool_error = str(exc)
+
+        if tool_error:
+            return _finalize_turn(
+                answer=f"Tool execution failed: {tool_error}",
                 usage=None,
                 tool_calls=[{"name": exec_tool_name, "input": exec_tool_args}],
-                conversation_id=conversation_id,
+                gate_outcome="ASK_CLARIFICATION",
+                gate_confidence=0.1,
+                gate_reason=f"Follow-up tool execution failed: {tool_error}",
+                result_type="error",
+                error=tool_error,
             )
+
+        # Confidence gate for follow-up result
+        gate = evaluate_confidence(
+            exec_tool_name,
+            exec_tool_args,
+            result_data,
+            latency_ms=timer.get("tool"),
+        )
+        _lite_append_event(
+            "tool",
+            {
+                "name": exec_tool_name,
+                "latency_ms": timer.get("tool"),
+                "error": tool_error or "",
+                "gate_outcome": gate.outcome.value,
+                "gate_confidence": gate.confidence,
+                "result_count": len(result_data) if isinstance(result_data, list) else 0,
+            },
+        )
+        track_confidence(conversation_id, gate)
+        turn_record.tools_called = [{"name": exec_tool_name, "input": exec_tool_args}]
 
         # Store this as the new last tool
         set_last_tool(conversation_id, exec_tool_name, exec_tool_args)
@@ -531,8 +620,24 @@ async def ask(body: AskRequest):
                 ),
             },
         ]
-        raw = invoke_claude(messages=messages, system=JOBLAB_SYSTEM, tools=[])
+        with timer.track("llm"):
+            raw = invoke_claude(messages=messages, system=JOBLAB_SYSTEM, tools=[])
+        usage = get_usage(raw)
+        _lite_append_event(
+            "llm",
+            {
+                "latency_ms": timer.get("llm"),
+                "stop_reason": raw.get("stopReason", ""),
+                "input_tokens": usage.get("input_tokens", 0),
+                "output_tokens": usage.get("output_tokens", 0),
+                "total_tokens": usage.get("total_tokens", 0),
+            },
+        )
         answer = extract_text(raw)
+
+        # Modify answer based on gate decision
+        if gate.outcome == GateOutcome.ASK_CLARIFICATION and gate.suggestion:
+            answer = f"{answer}\n\n{gate.suggestion}"
 
         # Set pending follow-up for the new result too
         set_pending_followup(conversation_id, {
@@ -541,12 +646,13 @@ async def ask(body: AskRequest):
             "tool_args": exec_tool_args,
         })
 
-        return AskResponse(
+        return _finalize_turn(
             answer=answer,
-            model=settings.bedrock_model_id,
-            usage=raw.get("usage"),
+            usage=usage,
             tool_calls=[{"name": exec_tool_name, "input": exec_tool_args}],
-            conversation_id=conversation_id,
+            gate_outcome=gate.outcome.value,
+            gate_confidence=gate.confidence,
+            gate_reason=gate.reason,
         )
 
     # ── Normal flow ─────────────────────────────────────────────────────
@@ -628,13 +734,28 @@ async def ask(body: AskRequest):
     no_tool_retry_count = 0
     has_called_tool = False
     collected_tool_calls: list[dict[str, Any]] = []
+    last_gate_decision = None
+    last_result_data = None
 
     try:
         for _round in range(MAX_TOOL_ROUNDS):
-            raw = invoke_claude(
-                messages=messages,
-                system=system,
-                tools=TOOL_DEFINITIONS,
+            with timer.track("llm"):
+                raw = invoke_claude(
+                    messages=messages,
+                    system=system,
+                    tools=TOOL_DEFINITIONS,
+                )
+            raw_usage = get_usage(raw)
+            _lite_append_event(
+                "llm",
+                {
+                    "round": _round + 1,
+                    "latency_ms": timer.get("llm"),
+                    "stop_reason": raw.get("stopReason", ""),
+                    "input_tokens": raw_usage.get("input_tokens", 0),
+                    "output_tokens": raw_usage.get("output_tokens", 0),
+                    "total_tokens": raw_usage.get("total_tokens", 0),
+                },
             )
 
             # No tool call -> either enforce or return text answer
@@ -649,7 +770,8 @@ async def ask(body: AskRequest):
                         no_tool_retry_count + 1,
                         MAX_SOFT_ENFORCEMENT_RETRIES,
                     )
-                    messages.append({"role": "assistant", "content": raw.get("content", [])})
+                    turn_record.soft_enforcement_retries = no_tool_retry_count + 1
+                    messages.append(get_assistant_message(raw))
                     messages.append(
                         {
                             "role": "user",
@@ -660,15 +782,35 @@ async def ask(body: AskRequest):
                     continue
 
                 if db_related_prompt and not has_called_tool:
-                    return AskResponse(
+                    return _finalize_turn(
                         answer="I could not complete this database request because no tool call was produced.",
-                        model=settings.bedrock_model_id,
-                        usage=raw.get("usage"),
+                        usage=raw_usage,
                         tool_calls=collected_tool_calls or None,
-                        conversation_id=conversation_id,
+                        gate_outcome="DECLINE",
+                        gate_confidence=0.0,
+                        gate_reason="No tool call produced for DB-related prompt after retries",
+                        result_type="decline",
                     )
 
                 answer = extract_text(raw)
+
+                # Apply confidence gate on final answer
+                gate_outcome = "ANSWER"
+                gate_confidence = 0.9
+                gate_reason = "Direct text answer"
+
+                if last_gate_decision:
+                    gate_outcome = last_gate_decision.outcome.value
+                    gate_confidence = last_gate_decision.confidence
+                    gate_reason = last_gate_decision.reason
+
+                    # Append clarification suggestion if confidence is low
+                    if (
+                        last_gate_decision.outcome == GateOutcome.ASK_CLARIFICATION
+                        and last_gate_decision.suggestion
+                    ):
+                        answer = f"{answer}\n\n{last_gate_decision.suggestion}"
+
                 # If tools were called, set pending follow-up for confirmation tracking
                 if has_called_tool and collected_tool_calls:
                     last_tc = collected_tool_calls[-1]
@@ -677,21 +819,24 @@ async def ask(body: AskRequest):
                         "tool_name": last_tc["name"],
                         "tool_args": last_tc["input"],
                     })
-                return AskResponse(
+
+                return _finalize_turn(
                     answer=answer,
-                    model=settings.bedrock_model_id,
-                    usage=raw.get("usage"),
+                    usage=raw_usage,
                     tool_calls=collected_tool_calls or None,
-                    conversation_id=conversation_id,
+                    gate_outcome=gate_outcome,
+                    gate_confidence=gate_confidence,
+                    gate_reason=gate_reason,
                 )
 
             # Tool call(s) -> execute each one
             has_called_tool = True
+            turn_record.tool_rounds += 1
             tool_calls = extract_tool_calls(raw)
             logger.info("Claude requested %d tool call(s)", len(tool_calls))
 
-            # Append the full assistant content (text + tool_use blocks)
-            messages.append({"role": "assistant", "content": raw["content"]})
+            # Append the full assistant message (Converse format)
+            messages.append(get_assistant_message(raw))
 
             # Execute each tool and build tool_result blocks
             tool_results: list[dict[str, Any]] = []
@@ -710,25 +855,94 @@ async def ask(body: AskRequest):
                     )
 
                 collected_tool_calls.append({"name": tool_name, "input": tool_input})
+                turn_record.tools_called.append({"name": tool_name, "input": tool_input})
 
                 executor = TOOL_EXECUTORS.get(tool_name)
+                tool_error = None
+                result_data = None
+
                 if executor is None:
                     result_content = json.dumps(
                         {"error": f"Unknown tool: {tool_name}"}
                     )
+                    tool_error = f"Unknown tool: {tool_name}"
                 else:
+                    with timer.track("tool"):
+                        try:
+                            result_data = executor(tool_input)
+                            result_content = json.dumps(result_data, default=str)
+                        except Exception as exc:
+                            logger.exception("Tool %s failed", tool_name)
+                            result_content = json.dumps(
+                                {"error": f"Tool execution failed: {exc}"}
+                            )
+                            tool_error = str(exc)
+
+                # ── Confidence Gate: evaluate tool results ──────────────
+                consecutive_low = get_consecutive_low_confidence(conversation_id)
+                gate = evaluate_confidence(
+                    tool_name,
+                    tool_input,
+                    result_data,
+                    latency_ms=timer.get("tool"),
+                    error=tool_error,
+                    consecutive_low_confidence=consecutive_low,
+                )
+                track_confidence(conversation_id, gate)
+                last_gate_decision = gate
+
+                logger.info(
+                    "Confidence gate: %s (%.2f) — %s",
+                    gate.outcome.value,
+                    gate.confidence,
+                    gate.reason,
+                )
+                _lite_append_event(
+                    "tool",
+                    {
+                        "round": _round + 1,
+                        "name": tool_name,
+                        "latency_ms": timer.get("tool"),
+                        "error": tool_error or "",
+                        "gate_outcome": gate.outcome.value,
+                        "gate_confidence": gate.confidence,
+                        "result_count": len(result_data) if isinstance(result_data, list) else 0,
+                    },
+                )
+
+                # ── MLflow: enrich current trace with tool + gate info ──
+                if _mlflow:
                     try:
-                        result_data = executor(tool_input)
-                        result_content = json.dumps(result_data, default=str)
-                    except Exception as exc:
-                        logger.exception("Tool %s failed", tool_name)
-                        result_content = json.dumps(
-                            {"error": f"Tool execution failed: {exc}"}
-                        )
+                        span = _mlflow.get_current_active_span()
+                        if span:
+                            result_count = len(result_data) if isinstance(result_data, list) else 0
+                            span.set_attributes({
+                                f"tool.{tool_name}.result_count": result_count,
+                                f"tool.{tool_name}.latency_ms": timer.get("tool"),
+                                f"tool.{tool_name}.error": tool_error or "",
+                                f"gate.{tool_name}.outcome": gate.outcome.value,
+                                f"gate.{tool_name}.confidence": gate.confidence,
+                                f"gate.{tool_name}.reason": gate.reason[:200],
+                            })
+                    except Exception:
+                        pass
+
+                # HANDOFF: stop processing, return escalation message
+                if gate.outcome == GateOutcome.HANDOFF:
+                    return _finalize_turn(
+                        answer=gate.suggestion or "I'm unable to process this request reliably. Please try rephrasing.",
+                        usage=raw_usage,
+                        tool_calls=collected_tool_calls,
+                        gate_outcome="HANDOFF",
+                        gate_confidence=gate.confidence,
+                        gate_reason=gate.reason,
+                        result_type="handoff",
+                    )
 
                 # Store last successful tool call in memory
-                if executor is not None:
+                if executor is not None and tool_error is None:
                     set_last_tool(conversation_id, tool_name, tool_input)
+                    last_result_data = result_data
 
                     # Store mentioned jobs for follow-up context
                     if tool_name in ("search_jobs", "semantic_search_jobs"):
@@ -739,18 +953,21 @@ async def ask(body: AskRequest):
                         except Exception:
                             pass  # non-fatal
 
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tool_id,
-                        "content": result_content,
-                    }
-                )
+                tool_results.append(make_tool_result_block(tool_id, result_content))
 
             messages.append({"role": "user", "content": tool_results})
 
         # Exhausted rounds - return whatever text we have
         answer = extract_text(raw)
+        gate_outcome = "ANSWER"
+        gate_confidence = 0.5
+        gate_reason = "Exhausted tool rounds"
+
+        if last_gate_decision:
+            gate_outcome = last_gate_decision.outcome.value
+            gate_confidence = last_gate_decision.confidence
+            gate_reason = last_gate_decision.reason
+
         # Set pending follow-up if tools were called
         if has_called_tool and collected_tool_calls:
             last_tc = collected_tool_calls[-1]
@@ -759,14 +976,184 @@ async def ask(body: AskRequest):
                 "tool_name": last_tc["name"],
                 "tool_args": last_tc["input"],
             })
-        return AskResponse(
+
+        return _finalize_turn(
             answer=answer or "I was unable to complete the request within the allowed steps.",
-            model=settings.bedrock_model_id,
-            usage=raw.get("usage"),
+            usage=raw_usage,
             tool_calls=collected_tool_calls or None,
-            conversation_id=conversation_id,
+            gate_outcome=gate_outcome,
+            gate_confidence=gate_confidence,
+            gate_reason=gate_reason,
         )
 
     except Exception as exc:
         logger.exception("Bedrock / tool-call loop failed")
+        # Log the error turn before re-raising
+        _finalize_turn(
+            answer="",
+            usage=None,
+            tool_calls=collected_tool_calls or None,
+            gate_outcome="HANDOFF",
+            gate_confidence=0.0,
+            gate_reason=f"Exception: {exc}",
+            result_type="error",
+            error=str(exc),
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ── Metrics Endpoint ───────────────────────────────────────────────────────
+
+
+@router.get(
+    "/metrics",
+    summary="Get aggregate AI agent metrics",
+    response_model=dict,
+)
+async def metrics():
+    """
+    Returns aggregate metrics for the AI agent:
+      - total_turns, outcome_counts, tool_usage_counts
+      - avg_latency_ms, avg_confidence
+      - success_rate, clarification_rate, handoff_rate, error_count
+    """
+    return get_aggregate_metrics()
+
+
+# ── MLflow Spool Flush Endpoint ─────────────────────────────────────────────
+
+
+@router.post(
+    "/mlflow/flush-spool",
+    response_model=MlflowFlushResponse,
+    responses={401: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    summary="Replay queued MLflow Lite logs from S3",
+)
+async def flush_mlflow_spool(
+    body: MlflowFlushRequest,
+    x_mlflow_spool_token: str | None = Header(default=None, alias="x-mlflow-spool-token"),
+):
+    settings = get_settings()
+    required = settings.mlflow_spool_flush_token.strip()
+    if required and x_mlflow_spool_token != required:
+        raise HTTPException(status_code=401, detail="Invalid spool flush token.")
+
+    try:
+        from app.services.mlflow_lite import get_lite_client
+
+        lite = get_lite_client()
+        if not lite:
+            raise HTTPException(
+                status_code=500,
+                detail="MLflow Lite client is not available.",
+            )
+
+        result = lite.flush_spool(max_items=body.max_items)
+        logger.info(
+            "MLflow spool flush processed=%d succeeded=%d failed=%d",
+            result.get("processed", 0),
+            result.get("succeeded", 0),
+            result.get("failed", 0),
+        )
+        return MlflowFlushResponse(
+            processed=result.get("processed", 0),
+            succeeded=result.get("succeeded", 0),
+            failed=result.get("failed", 0),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("MLflow spool flush failed")
+        raise HTTPException(status_code=500, detail=f"Spool flush failed: {exc}") from exc
+
+
+# ── Feedback Endpoint ──────────────────────────────────────────────────────
+
+
+@router.post(
+    "/feedback",
+    response_model=FeedbackResponse,
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    summary="Submit user feedback (thumbs up/down) for a traced AI turn",
+)
+async def feedback(body: FeedbackRequest):
+    """
+    Records user feedback against an MLflow trace.
+
+    The trace_id is returned in every AskResponse. The frontend sends it
+    back here with a boolean thumbs_up flag and optional comment.
+    """
+    if not _mlflow:
+        try:
+            from app.services.mlflow_lite import get_lite_client
+
+            lite = get_lite_client()
+            if not lite:
+                raise HTTPException(
+                    status_code=501,
+                    detail="MLflow is not available — feedback cannot be recorded.",
+                )
+
+            ok = lite.log_trace_feedback(
+                trace_id=body.trace_id,
+                thumbs_up=body.thumbs_up,
+                comment=body.comment or "",
+            )
+            if not ok:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Feedback recording failed in MLflow Lite.",
+                )
+
+            logger.info(
+                "Lite feedback recorded — trace_id=%s thumbs_up=%s comment=%s",
+                body.trace_id,
+                body.thumbs_up,
+                bool(body.comment),
+            )
+            return FeedbackResponse(trace_id=body.trace_id)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception("Failed to record Lite feedback for trace %s", body.trace_id)
+            raise HTTPException(status_code=500, detail=f"Feedback recording failed: {exc}") from exc
+
+    try:
+        from mlflow.entities import AssessmentSource, AssessmentSourceType
+
+        # Log thumbs up / down
+        _mlflow.log_feedback(
+            trace_id=body.trace_id,
+            name="user_satisfaction",
+            value=body.thumbs_up,
+            rationale=body.comment or ("User indicated response was helpful" if body.thumbs_up else "User indicated response was not helpful"),
+            source=AssessmentSource(
+                source_type=AssessmentSourceType.HUMAN,
+                source_id="ai_explorer_ui",
+            ),
+        )
+
+        # If a comment was provided, log it as a separate text feedback
+        if body.comment:
+            _mlflow.log_feedback(
+                trace_id=body.trace_id,
+                name="user_comment",
+                value=body.comment,
+                source=AssessmentSource(
+                    source_type=AssessmentSourceType.HUMAN,
+                    source_id="ai_explorer_ui",
+                ),
+            )
+
+        logger.info(
+            "Feedback recorded — trace_id=%s thumbs_up=%s comment=%s",
+            body.trace_id,
+            body.thumbs_up,
+            bool(body.comment),
+        )
+
+        return FeedbackResponse(trace_id=body.trace_id)
+
+    except Exception as exc:
+        logger.exception("Failed to record feedback for trace %s", body.trace_id)
+        raise HTTPException(status_code=500, detail=f"Feedback recording failed: {exc}") from exc

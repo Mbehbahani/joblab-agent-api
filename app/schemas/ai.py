@@ -39,6 +39,55 @@ class AskResponse(BaseModel):
     usage: dict | None = None
     tool_calls: list[dict] | None = None
     conversation_id: str | None = None
+    trace_id: str | None = Field(
+        default=None,
+        description="MLflow trace ID for this turn. Used by the client to submit feedback.",
+    )
+
+
+class FeedbackRequest(BaseModel):
+    """Body for the /ai/feedback endpoint."""
+
+    trace_id: str = Field(
+        ...,
+        description="MLflow trace ID returned in the AskResponse.",
+    )
+    thumbs_up: bool = Field(
+        ...,
+        description="True = positive feedback, False = negative.",
+    )
+    comment: str | None = Field(
+        default=None,
+        max_length=2000,
+        description="Optional free-text comment from the user.",
+    )
+
+
+class FeedbackResponse(BaseModel):
+    """Response confirming feedback was recorded."""
+
+    status: str = "ok"
+    trace_id: str
+
+
+class MlflowFlushRequest(BaseModel):
+    """Body for manual MLflow spool flush."""
+
+    max_items: int = Field(
+        default=100,
+        ge=1,
+        le=5000,
+        description="Maximum queued events to replay from S3 in this call.",
+    )
+
+
+class MlflowFlushResponse(BaseModel):
+    """Result of spool flush replay."""
+
+    status: str = "ok"
+    processed: int
+    succeeded: int
+    failed: int
 
 
 class HealthResponse(BaseModel):

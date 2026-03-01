@@ -1,5 +1,9 @@
 # =============================================================================
-# Lambda Backend – Optimized Python Dependencies for AWS Lambda
+# Lambda Backend – AWS Lambda Deployment Dependencies
+# =============================================================================
+# This file is a subset of requirements.txt optimised for Lambda package size.
+# Heavy dev-only packages (mlflow[genai], litellm, …) are excluded.
+# MLflow tracing code in the app gracefully degrades when mlflow is absent.
 # =============================================================================
 
 # Web framework
@@ -12,7 +16,7 @@ mangum>=0.18.0
 pydantic>=2.0
 pydantic-settings>=2.0
 
-# AWS SDK (Bedrock) - boto3 is available in Lambda runtime but specify for local testing
+# AWS SDK (Bedrock) - boto3 is available in Lambda runtime
 boto3>=1.34.0
 
 # HTTP client for Supabase REST queries
@@ -27,9 +31,5 @@ python-multipart>=0.0.9
 # Environment variables
 python-dotenv>=1.0.0
 
-# MLflow tracing & experiment tracking (genai extra includes token/cost parsing)
-mlflow[genai]>=3.1.0
-
-# PostgreSQL driver – required for direct-DB fallback when MLflow REST server
-# is unreachable (MLFLOW_TRACKING_URI_FALLBACK=postgresql://...)
+# PostgreSQL driver (used by CV storage / optional MLflow fallback)
 psycopg2-binary>=2.9.0

@@ -28,8 +28,31 @@ class Settings(BaseSettings):
     supabase_url: str = ""
     supabase_service_role_key: str = ""
 
-    # ── Railway PostgreSQL (CV storage) ──────────────────
-    railway_database_url: str = ""
+    # ── S3 CV Storage ─────────────────────────────────────
+    s3_cv_bucket: str = "joblab-cv-store"
+
+    # ── MLflow Tracking ──────────────────────────────────
+    mlflow_tracking_uri: str = "https://mlflow-production-34b0.up.railway.app"
+    mlflow_experiment_name: str = "joblab-ai-agent"
+
+    # Direct DB fallback: used when the MLflow REST server is unreachable.
+    # Set to a PostgreSQL URI, e.g. postgresql://user:pass@host:port/dbname
+    # MLflow writes runs/traces directly to the DB via SQLAlchemy.
+    # When the tracking server comes back, data appears automatically.
+    mlflow_tracking_uri_fallback: str = ""
+    # Artifact root for direct-DB mode (usually S3), e.g. s3://bucket/mlflow
+    mlflow_default_artifact_root: str = ""
+
+    # Durable store-and-forward for MLflow Lite when tracking server is down.
+    mlflow_spool_enabled: bool = True
+    # If empty, defaults to s3_cv_bucket
+    mlflow_spool_bucket: str = ""
+    # Prefix inside bucket for queued MLflow events
+    mlflow_spool_prefix: str = "mlflow-spool"
+    # Optional bearer token for manual flush endpoint
+    mlflow_spool_flush_token: str = ""
+    # Optional auto-flush on each invocation (0 disables)
+    mlflow_spool_autoflush_max_items: int = 0
 
     # ── CORS ─────────────────────────────────────────────
     cors_origins: str = "http://localhost:3000"

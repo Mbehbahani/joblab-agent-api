@@ -33,6 +33,30 @@ def lambda_handler(event, context):
         API Gateway-compatible response with statusCode, headers, and body
     """
     logger.info("Received event: %s", event.get("requestContext", {}).get("requestId", "unknown"))
-    
+
     # Mangum handles the conversion between API Gateway and ASGI
-    return handler(event, context)
+    response = handler(event, context)
+
+    # Flush MLflow async traces before Lambda freezes the execution environment.
+    # Without this, buffered traces queued by async_logging=True would be lost
+    # when the container is frozen/terminated.
+    try:
+        import mlflow
+        mlflow.flush_async_logging()
+    except ImportError:
+        # Full mlflow not installed — flush the lightweight REST client instead
+        try:
+            from app.services.mlflow_lite import get_lite_client
+            from app.config import get_settings
+            lite = get_lite_client()
+            if lite:
+                lite.flush(timeout=3)
+                auto_flush = max(0, int(get_settings().mlflow_spool_autoflush_max_items))
+                if auto_flush > 0:
+                    lite.flush_spool(max_items=auto_flush)
+        except Exception:
+            pass
+    except Exception as exc:
+        logger.warning("MLflow async flush failed (non-fatal): %s", exc)
+
+    return response

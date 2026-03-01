@@ -64,20 +64,20 @@ Migration from **ECS Fargate** to **AWS Lambda + API Gateway** to achieve:
 │  └───────────────────────────────────────────────────────────┘  │
 │                                                                   │
 │  Mangum Adapter: Converts API Gateway events to ASGI            │
-└────────┬───────────────────────────┬──────────────────────────┬─┘
-         │                           │                          │
-         │                           │                          │
-         ▼                           ▼                          ▼
-┌─────────────────┐     ┌────────────────────┐    ┌──────────────────┐
-│  AWS Bedrock    │     │     Supabase      │    │  CloudWatch      │
-│                 │     │                    │    │                  │
-│  Claude 3.5     │     │  PostgreSQL DB     │    │  Logs + Metrics  │
-│  Haiku          │     │  (via HTTP API)    │    │                  │
-│                 │     │                    │    │  • Invocations   │
-│  • Tool calling │     │  • Job listings    │    │  • Errors        │
-│  • Streaming    │     │  • Analytics       │    │  • Duration      │
-└─────────────────┘     └────────────────────┘    │  • Cold starts   │
-                                                   └──────────────────┘
+└────────┬───────────────────────────┬──────────────┬──────────┬──┘
+         │                           │              │          │
+         ▼                           ▼              ▼          ▼
+┌─────────────────┐     ┌──────────────────┐  ┌──────────┐  ┌──────────────────┐
+│  AWS Bedrock    │     │    Supabase     │  │CloudWatch│  │  MLflow (Railway) │
+│                 │     │                  │  │          │  │                    │
+│  Claude 3.5     │     │  PostgreSQL DB   │  │Logs +    │  │  Trace & cost     │
+│  Haiku          │     │  (via HTTP API)  │  │Metrics   │  │  tracking, user   │
+│                 │     │                  │  │          │  │  feedback          │
+│  • Tool calling │     │  • Job listings  │  │          │  │                    │
+│  • Streaming    │     │  • Analytics     │  │          │  │  Fallback: direct  │
+└─────────────────┘     └──────────────────┘  └──────────┘  │  DB write if       │
+                                                             │  server is down    │
+                                                             └──────────────────┘
 ```
 
 ## Component Breakdown
@@ -273,6 +273,61 @@ Total:                             ~$11.87/month
 
 ## Monitoring & Observability
 
+### MLflow Tracing (AI Agent Observability)
+
+All AI agent interactions are traced via **MLflow 3.x** for full observability:
+
+- **Tracking server**: Railway-hosted MLflow (`https://mlflow-production-34b0.up.railway.app`)
+- **Backend database**: Railway PostgreSQL
+- **Experiments**: `joblab-ai-agent` (local dev) / `joblab-ai-agent-production` (Lambda)
+- **Autolog**: `mlflow.bedrock.autolog()` patches boto3 to capture every Bedrock API call (tokens, latency, cost)
+- **User feedback**: Thumbs up/down logged via `mlflow.log_feedback()` against trace IDs
+
+**What gets traced per request:**
+- Parent `AGENT` span covering the full orchestration loop
+- Child spans for each LLM call (auto-captured by bedrock autolog)
+- Input prompt, output answer, gate outcome, tool call count
+- Token usage & estimated cost (computed client-side by `mlflow[genai]`)
+- Session/conversation metadata for grouping
+
+#### Direct-DB Fallback (Resilience)
+
+If the MLflow REST server is unreachable (e.g. Railway outage), the app **automatically falls back to writing traces directly to the PostgreSQL database** via SQLAlchemy:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  MLflow Tracing Flow                             │
+│                                                                   │
+│    App Startup                                                   │
+│        │                                                         │
+│        ▼                                                         │
+│    GET /health on MLflow server (5s timeout)                    │
+│        │                                                         │
+│        ├── ✅ Reachable → use REST API (normal mode)            │
+│        │                                                         │
+│        └── ❌ Unreachable                                        │
+│              │                                                   │
+│              ├── MLFLOW_TRACKING_URI_FALLBACK set?               │
+│              │     │                                             │
+│              │     ├── Yes → switch to postgresql:// direct DB   │
+│              │     │         Traces write via SQLAlchemy          │
+│              │     │         Artifacts → S3 bucket               │
+│              │     │         Data visible in MLflow UI when       │
+│              │     │         server comes back up ✅             │
+│              │     │                                             │
+│              │     └── No → tracing disabled (app runs normally) │
+│              │                                                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Environment variables for fallback:**
+| Variable | Example | Purpose |
+|----------|---------|---------|
+| `MLFLOW_TRACKING_URI_FALLBACK` | `postgresql://user:pass@host:port/db` | Direct DB connection |
+| `MLFLOW_DEFAULT_ARTIFACT_ROOT` | `s3://joblab-cv-store/mlflow-artifacts` | Artifact storage in S3 |
+
+**Local development note**: When running locally, the app uses your AWS credentials (from `~/.aws/credentials` or env vars) for both Bedrock calls AND S3 artifact storage in fallback mode. Ensure `aws sts get-caller-identity` succeeds before starting.
+
 ### CloudWatch Metrics (Automatic)
 - Invocations
 - Errors
@@ -390,3 +445,91 @@ Frontend (Next.js)
 - **No new vector DB**: Leverages existing `job_chunks` IVFFlat index with `vector_cosine_ops`
 - **Dual DB**: Railway stores user CVs; Supabase stores jobs. No cross-DB dependencies.
 - **Deterministic**: No LLM interpretation — pure vector math in PostgreSQL
+
+## Agent Quality Evaluation (MLflow GenAI)
+
+The project includes an offline evaluation framework using **`mlflow.genai.evaluate()`** to systematically measure agent quality. This uses the same Bedrock Claude model as both the agent and the LLM judge.
+
+### Architecture
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                    Evaluation Runner                            │
+│              (evals/eval_genai.py)                              │
+│                                                                  │
+│  ┌──────────────┐   ┌─────────────────┐   ┌────────────────┐  │
+│  │  Golden QA   │   │  predict_fn()   │   │   Scorers      │  │
+│  │  Dataset     │──▶│  POST /ai/ask   │──▶│                │  │
+│  │  (20 cases)  │   │  (local server) │   │  Custom:       │  │
+│  └──────────────┘   └────────┬────────┘   │  • tool_sel    │  │
+│                              │            │  • scope_enf   │  │
+│                              ▼            │  • completeness│  │
+│                     ┌────────────────┐    │                │  │
+│                     │  Agent Answer  │    │  LLM Judges    │  │
+│                     │  (outputs)     │───▶│  (Bedrock):    │  │
+│                     └────────────────┘    │  • Correctness │  │
+│                                           │  • Relevance   │  │
+│                                           │  • Guidelines  │  │
+│                                           └───────┬────────┘  │
+│                                                   │            │
+│                           ┌───────────────────────┘            │
+│                           ▼                                     │
+│                  ┌─────────────────┐                            │
+│                  │  MLflow Results │                            │
+│                  │  • Metrics      │                            │
+│                  │  • Per-case CSV │                            │
+│                  │  • Traces       │                            │
+│                  └─────────────────┘                            │
+└────────────────────────────────────────────────────────────────┘
+```
+
+### Three Components
+
+| Component | Description | File |
+|-----------|-------------|------|
+| **Dataset** | 20 golden QA pairs with inputs, expected responses, and expected tools | `evals/golden_qa_dataset.json` |
+| **Predict Function** | Calls `POST /ai/ask` on the local backend, returns the answer string | `evals/eval_genai.py:predict_fn()` |
+| **Scorers** | 3 custom scorers + 4 built-in LLM judges (Bedrock-powered) | `evals/eval_genai.py` |
+
+### Scorers
+
+**Custom scorers** (fast, no LLM cost):
+- `tool_selection_accuracy` — Does the output match the expected tool's signature?
+- `scope_enforcement` — Does the agent decline out-of-scope questions?
+- `response_completeness` — Is the response well-formed and adequate length?
+
+**Built-in LLM judges** (Bedrock Claude as judge):
+- `Correctness` — Does the answer support the expected facts?
+- `RelevanceToQuery` — Is the answer relevant to the question?
+- `domain_focus` (Guidelines) — Is the answer focused on job market topics?
+- `data_presentation` (Guidelines) — Is data presented clearly and structured?
+
+### Usage
+
+```bash
+# Start the local backend first
+uvicorn app.main:app --port 8000 --reload
+
+# Run full evaluation (in another terminal)
+python -m evals.eval_genai
+
+# Dry run (show dataset, no LLM calls)
+python -m evals.eval_genai --dry-run
+
+# Quick run (first 5 cases only)
+python -m evals.eval_genai --limit 5
+
+# Custom scorers only (skip Bedrock judge costs)
+python -m evals.eval_genai --no-builtin
+
+# Use a different judge model
+python -m evals.eval_genai --judge-model bedrock:/anthropic.claude-3-5-sonnet-20241022-v2:0
+```
+
+### Existing Tool-Choice Evaluation
+
+The original `evals/score_toolchoice.py` remains for focused tool-selection testing:
+- Sends prompts directly to Bedrock (no running server needed)
+- Extracts tool calls from raw API response
+- Scores tool accuracy, filter recall, filter precision
+- Uses the Golden Dataset at `evals/golden_dataset.json` (30 cases)

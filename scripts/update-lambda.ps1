@@ -72,7 +72,10 @@ if (-not (Test-Path $DeploymentPackage)) {
 }
 
 # Validate package freshness and required multipart dependency
-$RequirementsFile = Join-Path $LambdaDir "requirements.txt"
+$RequirementsFile = Join-Path $LambdaDir "requirements-lambda.txt"
+if (-not (Test-Path $RequirementsFile)) {
+    $RequirementsFile = Join-Path $LambdaDir "requirements.txt"
+}
 if ($SkipPackage -and (Test-Path $RequirementsFile)) {
     $ReqLastWrite = (Get-Item $RequirementsFile).LastWriteTimeUtc
     $PkgLastWrite = (Get-Item $DeploymentPackage).LastWriteTimeUtc
@@ -147,21 +150,32 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "✅ Lambda function code updated" -ForegroundColor Green
 
-# Wait for update to complete
+# Wait for function to become Active (with timeout)
 Write-Host ""
-Write-Host "Waiting for update to complete..." -ForegroundColor Yellow
-Start-Sleep -Seconds 3
+Write-Host "Waiting for function to become Active..." -ForegroundColor Yellow
+$WaitTimeout = 300  # seconds
+$WaitStart = Get-Date
+$PollInterval = 5
 
-# Check function state
-$FunctionState = aws lambda get-function --function-name $FunctionName --region $Region | ConvertFrom-Json
-$State = $FunctionState.Configuration.State
+while ($true) {
+    $Elapsed = ((Get-Date) - $WaitStart).TotalSeconds
+    if ($Elapsed -gt $WaitTimeout) {
+        Write-Host "❌ Timed out after ${WaitTimeout}s waiting for function to become Active" -ForegroundColor Red
+        Write-Host "   Check function status: aws lambda get-function --function-name $FunctionName --region $Region" -ForegroundColor Yellow
+        exit 1
+    }
 
-if ($State -eq "Active") {
-    Write-Host "✅ Function is active and ready" -ForegroundColor Green
-} else {
-    Write-Host "⚠️  Function state: $State" -ForegroundColor Yellow
-    Write-Host "   Waiting for activation..." -ForegroundColor Gray
-    Start-Sleep -Seconds 5
+    $FunctionState = aws lambda get-function --function-name $FunctionName --region $Region | ConvertFrom-Json
+    $State = $FunctionState.Configuration.State
+    $LastUpdate = $FunctionState.Configuration.LastUpdateStatus
+
+    if ($State -eq "Active" -and $LastUpdate -ne "InProgress") {
+        Write-Host "✅ Function is Active (took $([math]::Round($Elapsed))s)" -ForegroundColor Green
+        break
+    }
+
+    Write-Host "   State=$State  LastUpdateStatus=$LastUpdate  (${([math]::Round($Elapsed))}s elapsed)" -ForegroundColor Gray
+    Start-Sleep -Seconds $PollInterval
 }
 
 # Step 3: Test endpoint (optional)
