@@ -517,6 +517,7 @@ async def ask(body: AskRequest):
             usage=usage,
             tool_calls=tool_calls or None,
             conversation_id=conversation_id,
+            turn_id=turn_id,
             trace_id=_trace_id,
         )
 
@@ -1080,9 +1081,57 @@ async def feedback(body: FeedbackRequest):
     """
     Records user feedback against an MLflow trace.
 
-    The trace_id is returned in every AskResponse. The frontend sends it
-    back here with a boolean thumbs_up flag and optional comment.
+    Preferred path uses trace_id from AskResponse. If trace_id is not yet
+    available (tracking server outage), the frontend can send
+    (conversation_id, turn_id) and feedback is queued for later attachment.
     """
+    # If trace_id is unavailable (common when tracking server is down),
+    # accept offline feedback keyed by (conversation_id, turn_id).
+    if not body.trace_id:
+        try:
+            from app.services.mlflow_lite import get_lite_client
+
+            lite = get_lite_client()
+            if not lite:
+                raise HTTPException(
+                    status_code=501,
+                    detail="MLflow is not available — feedback cannot be recorded.",
+                )
+
+            ok = lite.log_offline_trace_feedback(
+                conversation_id=body.conversation_id or "",
+                turn_id=body.turn_id or "",
+                thumbs_up=body.thumbs_up,
+                comment=body.comment or "",
+            )
+            if not ok:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Offline feedback queueing failed in MLflow Lite.",
+                )
+
+            logger.info(
+                "Lite offline feedback accepted — conversation_id=%s turn_id=%s thumbs_up=%s comment=%s",
+                body.conversation_id,
+                body.turn_id,
+                body.thumbs_up,
+                bool(body.comment),
+            )
+            return FeedbackResponse(
+                trace_id=None,
+                conversation_id=body.conversation_id,
+                turn_id=body.turn_id,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Failed to record Lite offline feedback for conversation=%s turn=%s",
+                body.conversation_id,
+                body.turn_id,
+            )
+            raise HTTPException(status_code=500, detail=f"Feedback recording failed: {exc}") from exc
+
     if not _mlflow:
         try:
             from app.services.mlflow_lite import get_lite_client

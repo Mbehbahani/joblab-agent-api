@@ -2,7 +2,7 @@
 Pydantic models for request / response validation.
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ── Requests ────────────────────────────────────────────────────────────────
@@ -39,6 +39,10 @@ class AskResponse(BaseModel):
     usage: dict | None = None
     tool_calls: list[dict] | None = None
     conversation_id: str | None = None
+    turn_id: str | None = Field(
+        default=None,
+        description="Server-generated turn ID for this answer. Used for offline feedback fallback.",
+    )
     trace_id: str | None = Field(
         default=None,
         description="MLflow trace ID for this turn. Used by the client to submit feedback.",
@@ -48,9 +52,17 @@ class AskResponse(BaseModel):
 class FeedbackRequest(BaseModel):
     """Body for the /ai/feedback endpoint."""
 
-    trace_id: str = Field(
-        ...,
-        description="MLflow trace ID returned in the AskResponse.",
+    trace_id: str | None = Field(
+        default=None,
+        description="MLflow trace ID returned in the AskResponse when available.",
+    )
+    conversation_id: str | None = Field(
+        default=None,
+        description="Conversation ID fallback when trace_id is not available yet.",
+    )
+    turn_id: str | None = Field(
+        default=None,
+        description="Turn ID fallback when trace_id is not available yet.",
     )
     thumbs_up: bool = Field(
         ...,
@@ -62,12 +74,24 @@ class FeedbackRequest(BaseModel):
         description="Optional free-text comment from the user.",
     )
 
+    @model_validator(mode="after")
+    def _validate_locator(self) -> "FeedbackRequest":
+        if self.trace_id:
+            return self
+        if self.conversation_id and self.turn_id:
+            return self
+        raise ValueError(
+            "Provide trace_id, or provide both conversation_id and turn_id."
+        )
+
 
 class FeedbackResponse(BaseModel):
     """Response confirming feedback was recorded."""
 
     status: str = "ok"
-    trace_id: str
+    trace_id: str | None = None
+    conversation_id: str | None = None
+    turn_id: str | None = None
 
 
 class MlflowFlushRequest(BaseModel):

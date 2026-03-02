@@ -202,6 +202,61 @@ class MLflowLiteClient:
             f"{int(time.time() * 1000)}-{op}-{uuid.uuid4().hex}.json"
         )
 
+    @staticmethod
+    def _safe_key_part(value: str) -> str:
+        return (value or "").replace("/", "_").replace("\\", "_")
+
+    def _trace_index_key(self, conversation_id: str, turn_id: str) -> str:
+        conv = self._safe_key_part(conversation_id)
+        turn = self._safe_key_part(turn_id)
+        return f"{self._spool_prefix}-index/{conv}/{turn}.json"
+
+    def _trace_index_put(self, conversation_id: str, turn_id: str, trace_id: str) -> None:
+        if not (self._spool_enabled and self._s3 and conversation_id and turn_id and trace_id):
+            return
+        key = self._trace_index_key(conversation_id, turn_id)
+        payload = {
+            "conversation_id": conversation_id,
+            "turn_id": turn_id,
+            "trace_id": trace_id,
+            "updated_at_ms": int(time.time() * 1000),
+        }
+        try:
+            self._s3.put_object(
+                Bucket=self._spool_bucket,
+                Key=key,
+                Body=json.dumps(payload, default=str),
+                ContentType="application/json",
+            )
+        except Exception as exc:
+            logger.warning(
+                "MLflow Lite trace index put failed conversation=%s turn=%s err=%s",
+                conversation_id,
+                turn_id,
+                exc,
+            )
+
+    def _trace_index_get(self, conversation_id: str, turn_id: str) -> Optional[str]:
+        if not (self._spool_enabled and self._s3 and conversation_id and turn_id):
+            return None
+        key = self._trace_index_key(conversation_id, turn_id)
+        try:
+            resp = self._s3.get_object(Bucket=self._spool_bucket, Key=key)
+            body = resp["Body"].read()
+            data = json.loads(body)
+            trace_id = str(data.get("trace_id", "")).strip()
+            return trace_id or None
+        except ClientError:
+            return None
+        except Exception as exc:
+            logger.warning(
+                "MLflow Lite trace index get failed conversation=%s turn=%s err=%s",
+                conversation_id,
+                turn_id,
+                exc,
+            )
+            return None
+
     def _spool_put(self, op: str, payload: dict[str, Any]) -> bool:
         if not self._spool_enabled or not self._s3:
             return False
@@ -377,6 +432,7 @@ class MLflowLiteClient:
         trace_id = trace_info.get("request_id")
         if trace_id:
             logger.info("MLflow Lite: started trace %s", trace_id[:8])
+            self._trace_index_put(conversation_id, turn_id, trace_id)
         return trace_id
 
     def set_trace_tag(
@@ -627,6 +683,14 @@ class MLflowLiteClient:
                         comment=str(payload.get("comment", "")),
                         spool_on_failure=False,
                     )
+                elif op == "trace_feedback_offline":
+                    ok = self.log_offline_trace_feedback(
+                        conversation_id=str(payload.get("conversation_id", "")),
+                        turn_id=str(payload.get("turn_id", "")),
+                        thumbs_up=bool(payload.get("thumbs_up")),
+                        comment=str(payload.get("comment", "")),
+                        spool_on_failure=False,
+                    )
             except Exception as exc:
                 logger.warning("MLflow Lite spool replay failed key=%s err=%s", key, exc)
                 ok = False
@@ -818,6 +882,43 @@ class MLflowLiteClient:
                 },
             )
         return ok
+
+    def log_offline_trace_feedback(
+        self,
+        *,
+        conversation_id: str,
+        turn_id: str,
+        thumbs_up: bool,
+        comment: str = "",
+        spool_on_failure: bool = True,
+    ) -> bool:
+        """
+        Record feedback when trace_id is not available yet.
+        Resolves trace_id via S3 trace-index once the trace is replayed.
+        """
+        if not conversation_id or not turn_id:
+            return False
+
+        trace_id = self._trace_index_get(conversation_id, turn_id)
+        if trace_id:
+            return self.log_trace_feedback(
+                trace_id=trace_id,
+                thumbs_up=thumbs_up,
+                comment=comment,
+                spool_on_failure=spool_on_failure,
+            )
+
+        if spool_on_failure:
+            return self._spool_put(
+                "trace_feedback_offline",
+                {
+                    "conversation_id": conversation_id,
+                    "turn_id": turn_id,
+                    "thumbs_up": thumbs_up,
+                    "comment": comment[:1000],
+                },
+            )
+        return False
 
     def log_feedback(self, run_id: str, thumbs_up: bool, comment: str = "") -> None:
         """Attach user feedback as tags on an existing run."""
