@@ -135,3 +135,5 @@ run
 evals/dagshub.env.example
 run.txt
 evals
+Guide/
+scripts/

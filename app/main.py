@@ -31,17 +31,32 @@ try:
     _using_fallback = False
 
     if _tracking_uri.startswith("http"):
-        # Probe the tracking server's /health endpoint
-        try:
-            _resp = _health_req.get(
-                f"{_tracking_uri.rstrip('/')}/health", timeout=5,
-            )
-            _resp.raise_for_status()
-            _log.info("MLflow server is reachable (%s)", _tracking_uri)
-        except Exception as _hc_err:
-            _log.warning(
-                "MLflow server unreachable (%s): %s", _tracking_uri, _hc_err,
-            )
+        # Probe each candidate server in order:
+        #   1. Primary (settings.mlflow_tracking_uri)
+        #   2. Local MLflow instance (http://localhost:5001)
+        _LOCAL_MLFLOW = "http://localhost:5001"
+        _candidates = [_tracking_uri]
+        if _tracking_uri.rstrip("/") != _LOCAL_MLFLOW.rstrip("/"):
+            _candidates.append(_LOCAL_MLFLOW)
+
+        _reached = False
+        for _candidate in _candidates:
+            try:
+                _resp = _health_req.get(
+                    f"{_candidate.rstrip('/')}/health", timeout=5,
+                )
+                _resp.raise_for_status()
+                _tracking_uri = _candidate
+                _reached = True
+                _log.info("MLflow server is reachable (%s)", _tracking_uri)
+                break
+            except Exception as _hc_err:
+                _log.warning(
+                    "MLflow server unreachable (%s): %s", _candidate, _hc_err,
+                )
+
+        if not _reached:
+            # 3. Direct-DB fallback (MLFLOW_TRACKING_URI_FALLBACK)
             if settings.mlflow_tracking_uri_fallback:
                 _tracking_uri = settings.mlflow_tracking_uri_fallback
                 _using_fallback = True
@@ -50,8 +65,9 @@ try:
                     _tracking_uri.split("@")[-1] if "@" in _tracking_uri else _tracking_uri[:40],
                 )
             else:
+                # 4. All options exhausted — disable tracing
                 _log.warning(
-                    "MLflow server unreachable and no MLFLOW_TRACKING_URI_FALLBACK set — tracing disabled"
+                    "All MLflow servers unreachable and no MLFLOW_TRACKING_URI_FALLBACK set — tracing disabled"
                 )
                 raise ImportError("skip tracing")  # caught below, cleanly disables tracing
 
