@@ -132,8 +132,8 @@ DEPLOYMENT_*.md
 #   git commit -m "Add .gitignore"
 scripts/update-lambda.ps1
 run
-evals/dagshub.env.example
+evals/results
+evals/*.json
 run.txt
-evals
 Guide/
 scripts/
