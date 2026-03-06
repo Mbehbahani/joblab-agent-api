@@ -137,3 +137,6 @@ evals/*.json
 run.txt
 Guide/
 scripts/
+.goose
+.agents
+skills-lock.json
