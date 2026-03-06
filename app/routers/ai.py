@@ -12,7 +12,6 @@ MLflow Tracing:
   - Child spans: LLM inference, tool execution, confidence gate
   - Autolog (from main.py) also traces raw boto3 calls
 """
-
 import json
 import logging
 import uuid
@@ -70,7 +69,6 @@ from app.services.turn_logger import (
 )
 
 logger = logging.getLogger(__name__)
-
 # ── MLflow availability ─────────────────────────────────────────────────────
 _mlflow = None
 _SpanType = None
@@ -80,14 +78,12 @@ try:
 except ImportError:
     pass
 
-
 router = APIRouter(prefix="/ai", tags=["ai"])
 
 # ── System prompt from policy layer (replaces monolithic string) ────────────
 # The prompt is now composed from discrete, testable sections.
 # See app/services/prompt_policy.py for the full policy.
 JOBLAB_SYSTEM = get_system_prompt(DEFAULT_POLICY)
-
 
 MAX_TOOL_ROUNDS = 5  # safety: prevent infinite tool loops
 MAX_SOFT_ENFORCEMENT_RETRIES = 2
@@ -133,11 +129,9 @@ DB_RELATED_KEYWORDS = [
     "more about",
 ]
 
-
 def _is_database_related(prompt: str) -> bool:
     prompt_lower = prompt.lower()
     return any(keyword in prompt_lower for keyword in DB_RELATED_KEYWORDS)
-
 
 def _extract_jobs_from_results(tool_name: str, result_data: Any) -> list[dict[str, Any]]:
     """
@@ -163,7 +157,6 @@ def _extract_jobs_from_results(tool_name: str, result_data: Any) -> list[dict[st
         })
     return jobs
 
-
 def _is_job_detail_followup(prompt: str) -> bool:
     """Detect if user is asking about a previously mentioned job."""
     prompt_lower = prompt.lower()
@@ -175,7 +168,6 @@ def _is_job_detail_followup(prompt: str) -> bool:
         "show me the", "open the",
     ]
     return any(t in prompt_lower for t in triggers)
-
 
 # Short affirmative/vague follow-ups that imply "continue with previous context"
 _AFFIRMATIVE_PATTERNS = [
@@ -208,12 +200,10 @@ def _is_affirmative_followup(prompt: str) -> bool:
     prompt_lower = prompt.strip().lower().rstrip("!.,?")
     return prompt_lower in _AFFIRMATIVE_PATTERNS
 
-
 def _is_negative_followup(prompt: str) -> bool:
     """Check if prompt is a short negative/declining response."""
     prompt_lower = prompt.strip().lower().rstrip("!.,?")
     return prompt_lower in _NEGATIVE_PATTERNS
-
 
 def _infer_research_filter(prompt: str) -> bool | None:
     """
@@ -229,7 +219,6 @@ def _infer_research_filter(prompt: str) -> bool | None:
     if "research" in prompt_lower:
         return True
     return None
-
 
 def _enforce_prompt_filters(
     tool_name: str,
@@ -250,7 +239,6 @@ def _enforce_prompt_filters(
         adjusted_input["is_research"] = research_filter
 
     return adjusted_input
-
 
 def _build_followup_args(tool_name: str, tool_args: dict) -> tuple[str, dict]:
     """
@@ -298,7 +286,6 @@ def _build_followup_args(tool_name: str, tool_args: dict) -> tuple[str, dict]:
 
     # Fallback: re-run same tool
     return tool_name, dict(tool_args)
-
 
 @router.post(
     "/ask",
@@ -1002,10 +989,7 @@ async def ask(body: AskRequest):
         )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-
 # ── Metrics Endpoint ───────────────────────────────────────────────────────
-
-
 @router.get(
     "/metrics",
     summary="Get aggregate AI agent metrics",
@@ -1020,10 +1004,7 @@ async def metrics():
     """
     return get_aggregate_metrics()
 
-
 # ── MLflow Spool Flush Endpoint ─────────────────────────────────────────────
-
-
 @router.post(
     "/mlflow/flush-spool",
     response_model=MlflowFlushResponse,
@@ -1067,10 +1048,7 @@ async def flush_mlflow_spool(
         logger.exception("MLflow spool flush failed")
         raise HTTPException(status_code=500, detail=f"Spool flush failed: {exc}") from exc
 
-
 # ── Feedback Endpoint ──────────────────────────────────────────────────────
-
-
 @router.post(
     "/feedback",
     response_model=FeedbackResponse,
