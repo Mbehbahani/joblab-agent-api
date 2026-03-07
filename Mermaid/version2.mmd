@@ -1,0 +1,126 @@
+ %%{init: {
+   "theme": "base",
+   "themeVariables": {
+     "fontFamily": "Inter, Segoe UI, Arial, sans-serif",
+     "fontSize": "54px",
+     "messageFontSize": "154px",
+     "noteFontSize": "154px",
+     "actorFontSize": "154px",
+     "primaryColor": "#E8F1FF",
+     "primaryTextColor": "#0F172A",
+     "primaryBorderColor": "#2563EB",
+    "lineColor": "#334155",
+    "secondaryColor": "#ECFEFF",
+    "tertiaryColor": "#F8FAFC",
+    "actorBkg": "#DBEAFE",
+    "actorBorder": "#2563EB",
+    "actorTextColor": "#0F172A",
+    "actorLineColor": "#2563EB",
+    "signalColor": "#334155",
+    "signalTextColor": "#0F172A",
+    "labelBoxBkgColor": "#EFF6FF",
+    "labelBoxBorderColor": "#2563EB",
+    "labelTextColor": "#0F172A",
+    "loopTextColor": "#7C2D12",
+    "noteBkgColor": "#FEF3C7",
+    "noteBorderColor": "#D97706",
+     "noteTextColor": "#78350F",
+     "activationBorderColor": "#1D4ED8",
+     "activationBkgColor": "#BFDBFE",
+     "sequenceNumberColor": "#FFFFFF",
+     "sequenceNumberBkgColor": "#1D4ED8",
+    "sequenceNumberBorderColor": "#1D4ED8",
+    "tertiaryTextColor": "#0F172A"
+   }
+ }}%%
+
+sequenceDiagram
+    autonumber
+
+    actor User as User
+    participant FE as 🌐 Frontend UI
+    participant API as ⚙️ FastAPI<br/>app/routers/ai.py<br/>ask()
+    participant MEM as 🧩 Memory Layer<br/>conversation_memory.py
+    participant POLICY as 📘 Prompt Policy<br/>prompt_policy.py
+    participant BEDROCK as 🤖 Bedrock Wrapper<br/>bedrock.py<br/>invoke_claude()
+    participant CLAUDE as 🧠 AWS Bedrock Claude
+    participant TOOLS as 🛠️ Tool Executors<br/>joblab_tools.py
+    participant DB as 🗄️ Jobs Data Store<br/>Supabase
+    participant GATE as 🛡️ Confidence Gate<br/>confidence_gate.py
+    participant LOG as 📊 Observability<br/>MLflow + turn_logger.py
+
+    Note over API,LOG: Job assistant orchestration with tool-calling, confidence gating, memory, and tracing
+
+    rect rgb(232, 241, 255)
+        User->>FE: Ask a jobs question
+        FE->>API: POST /ai/ask
+        activate API
+        API->>LOG: Start trace / turn record
+        API->>MEM: Load pending follow-up, last tool, mentioned jobs
+        MEM-->>API: Conversation context
+        API->>POLICY: Build system prompt
+        POLICY-->>API: JOBLAB_SYSTEM
+    end
+
+    rect rgb(236, 254, 255)
+        API->>BEDROCK: invoke_claude(messages, system, tools)
+        activate BEDROCK
+        BEDROCK->>CLAUDE: Converse API request
+        activate CLAUDE
+        CLAUDE-->>BEDROCK: text or tool_use
+        deactivate CLAUDE
+        BEDROCK->>LOG: Enrich active span with tokens, latency, stop reason
+        BEDROCK-->>API: Raw Converse response
+        deactivate BEDROCK
+    end
+
+    alt Claude returns direct text
+        rect rgb(248, 250, 252)
+            API->>LOG: Log final answer and usage
+            API-->>FE: AskResponse
+            FE-->>User: Render answer
+        end
+    else Claude returns tool_use
+        rect rgb(240, 253, 244)
+            API->>TOOLS: Execute selected tool(s)
+            activate TOOLS
+            TOOLS->>DB: Query jobs, stats, or semantic search
+            activate DB
+            DB-->>TOOLS: Structured results
+            deactivate DB
+            TOOLS->>LOG: Enrich tool span with result metadata
+            TOOLS-->>API: Tool output
+            deactivate TOOLS
+        end
+
+        rect rgb(254, 252, 232)
+            API->>GATE: evaluate_confidence(tool, input, result, latency, error)
+            activate GATE
+            GATE-->>API: ANSWER / ASK_CLARIFICATION / DECLINE / HANDOFF
+            deactivate GATE
+        end
+
+        alt Gate outcome = HANDOFF
+            rect rgb(255, 237, 213)
+                API->>LOG: Log handoff outcome and context
+                API-->>FE: Handoff / escalation response
+                FE-->>User: Show escalation message
+            end
+        else Gate outcome allows continuation
+            rect rgb(245, 243, 255)
+                API->>BEDROCK: Send toolResult blocks for final summarization
+                activate BEDROCK
+                BEDROCK->>CLAUDE: Converse API follow-up
+                activate CLAUDE
+                CLAUDE-->>BEDROCK: Final natural-language answer
+                deactivate CLAUDE
+                BEDROCK->>LOG: Enrich span for second LLM step
+                BEDROCK-->>API: Final answer
+                deactivate BEDROCK
+                API->>LOG: Log tools, latency, confidence, trace outputs
+                API-->>FE: AskResponse
+                FE-->>User: Render final answer
+            end
+        end
+    end
+    deactivate API

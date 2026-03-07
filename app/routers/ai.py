@@ -508,6 +508,7 @@ async def ask(body: AskRequest):
             trace_id=_trace_id,
         )
 
+# ------------------------------------------------------------------
     # ── Dialogue state: handle affirmative/negative follow-ups ──────────
     pending = get_pending_followup(conversation_id)
 

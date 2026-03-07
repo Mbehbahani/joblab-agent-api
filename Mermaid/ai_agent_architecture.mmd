@@ -1,0 +1,17 @@
+sequenceDiagram
+    actor User
+    participant FE as 🌐 Frontend
+    participant API as ⚙️ FastAPI
+    participant AI as 🧠 LLM Service
+    participant DB as 🗄️ Vector DB
+    participant LOG as 📊 MLflow
+
+    User->>FE: Search jobs
+    FE->>API: API request
+    API->>AI: Create embeddings
+    AI-->>API: Vector
+    API->>DB: Similarity search
+    DB-->>API: Results
+    API->>LOG: Log metrics
+    API-->>FE: Response
+    FE-->>User: Show results

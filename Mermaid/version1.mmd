@@ -1,0 +1,49 @@
+sequenceDiagram
+    autonumber
+
+    actor User
+    participant FE as Frontend
+    participant API as app/routers/ai.py ask()
+    participant MEM as conversation_memory.py
+    participant POLICY as prompt_policy.py get_system_prompt()
+    participant BEDROCK as bedrock.py invoke_claude()
+    participant TOOLS as joblab_tools.py TOOL_EXECUTORS
+    participant DB as Supabase Jobs Data
+    participant GATE as confidence_gate.py evaluate_confidence()
+    participant LOG as MLflow / turn_logger.py
+
+    User->>FE: Ask a jobs question
+    FE->>API: POST /ai/ask
+    API->>LOG: Start trace
+    API->>MEM: Load memory/context
+    MEM-->>API: Previous state
+    API->>POLICY: Build system prompt
+    POLICY-->>API: Prompt text
+
+    API->>BEDROCK: Send prompt + messages + tool definitions
+    BEDROCK-->>API: Claude response
+
+    alt Claude returns direct text
+        API->>LOG: Log final answer
+        API-->>FE: Response
+    else Claude returns tool_use
+        API->>TOOLS: Execute selected tool
+        TOOLS->>DB: Query structured data
+        DB-->>TOOLS: Results
+        TOOLS-->>API: Tool output
+
+        API->>GATE: Score confidence
+        GATE-->>API: Decision
+
+        alt Decision = HANDOFF
+            API->>LOG: Log handoff
+            API-->>FE: Handoff response
+        else Decision = ANSWER / ASK_CLARIFICATION / DECLINE
+            API->>BEDROCK: Send tool results back for summarization
+            BEDROCK-->>API: Final natural-language answer
+            API->>LOG: Log usage, latency, tools, gate result
+            API-->>FE: Final response
+        end
+    end
+
+    FE-->>User: Render answer
