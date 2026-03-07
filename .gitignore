@@ -140,3 +140,5 @@ scripts/
 .goose
 .agents
 skills-lock.json
+Mermaid/
+*.mmd
