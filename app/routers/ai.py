@@ -287,6 +287,24 @@ def _build_followup_args(tool_name: str, tool_args: dict) -> tuple[str, dict]:
     # Fallback: re-run same tool
     return tool_name, dict(tool_args)
 
+
+def _base_trace_tags(
+    *,
+    settings: Any,
+    conversation_id: str,
+    prompt: str,
+) -> dict[str, Any]:
+    """Build common trace tags for both full MLflow and lite tracing."""
+    tags: dict[str, Any] = {
+        "conversation_id": conversation_id,
+        "prompt_preview": prompt[:120],
+    }
+    tag_key = settings.mlflow_trace_tag_key.strip()
+    tag_value = settings.mlflow_trace_tag_value.strip()
+    if tag_key and tag_value:
+        tags[tag_key] = tag_value
+    return tags
+
 @router.post(
     "/ask",
     response_model=AskResponse,
@@ -310,6 +328,11 @@ async def ask(body: AskRequest):
     # ── Initialize turn tracking (must be before MLflow so conversation_id exists) ──
     turn_id = str(uuid.uuid4())
     conversation_id = body.conversation_id or str(uuid.uuid4())
+    trace_tags = _base_trace_tags(
+        settings=settings,
+        conversation_id=conversation_id,
+        prompt=body.prompt,
+    )
     timer = TurnTimer()
     timer.start()
 
@@ -341,10 +364,7 @@ async def ask(body: AskRequest):
                 metadata={
                     "mlflow.trace.session": conversation_id,
                 },
-                tags={
-                    "conversation_id": conversation_id,
-                    "prompt_preview": body.prompt[:120],
-                },
+                tags=trace_tags,
             )
         except Exception as _exc:
             logger.debug("MLflow span creation failed: %s", _exc)

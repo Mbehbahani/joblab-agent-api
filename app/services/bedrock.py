@@ -36,6 +36,19 @@ except ImportError:
 
 _bedrock_client = None
 
+_MODEL_PRICING_PER_MILLION_TOKENS: dict[str, tuple[float, float]] = {
+    "us.anthropic.claude-3-5-haiku-20241022-v1:0": (0.80, 4.00),
+    "anthropic.claude-3-5-haiku-20241022-v1:0": (0.80, 4.00),
+    "us.anthropic.claude-3-5-sonnet-20241022-v2:0": (3.00, 15.00),
+    "anthropic.claude-3-5-sonnet-20241022-v2:0": (3.00, 15.00),
+    "us.anthropic.claude-3-7-sonnet-20250219-v1:0": (3.00, 15.00),
+    "anthropic.claude-3-7-sonnet-20250219-v1:0": (3.00, 15.00),
+    "us.anthropic.claude-sonnet-4-20250514-v1:0": (3.00, 15.00),
+    "anthropic.claude-sonnet-4-20250514-v1:0": (3.00, 15.00),
+    "us.anthropic.claude-opus-4-20250514-v1:0": (15.00, 75.00),
+    "anthropic.claude-opus-4-20250514-v1:0": (15.00, 75.00),
+}
+
 
 def _get_client(settings: Settings | None = None):
     """Return a reusable bedrock-runtime client (created once)."""
@@ -53,6 +66,44 @@ def reset_client() -> None:
     """Force recreation of the boto3 client (e.g. after autolog is enabled)."""
     global _bedrock_client
     _bedrock_client = None
+
+
+def _resolve_model_pricing(settings: Settings) -> tuple[float, float] | None:
+    """Resolve USD-per-1M-token pricing for the configured model."""
+    if (
+        settings.bedrock_input_cost_per_million_tokens is not None
+        and settings.bedrock_output_cost_per_million_tokens is not None
+    ):
+        return (
+            settings.bedrock_input_cost_per_million_tokens,
+            settings.bedrock_output_cost_per_million_tokens,
+        )
+
+    return _MODEL_PRICING_PER_MILLION_TOKENS.get(settings.bedrock_model_id.lower())
+
+
+def _calculate_usage_cost(
+    usage: dict[str, Any],
+    settings: Settings,
+) -> dict[str, float] | None:
+    """Convert token usage to USD cost for MLflow span attributes."""
+    pricing = _resolve_model_pricing(settings)
+    if not pricing:
+        return None
+
+    input_tokens = int(usage.get("inputTokens", 0) or 0)
+    output_tokens = int(usage.get("outputTokens", 0) or 0)
+    input_rate, output_rate = pricing
+
+    input_cost = (input_tokens / 1_000_000) * input_rate
+    output_cost = (output_tokens / 1_000_000) * output_rate
+    total_cost = input_cost + output_cost
+
+    return {
+        "input_cost": input_cost,
+        "output_cost": output_cost,
+        "total_cost": total_cost,
+    }
 
 
 # ── Message helpers ─────────────────────────────────────────────────────────
@@ -183,7 +234,7 @@ def invoke_claude(
             span = _mlflow.get_current_active_span()
             if span:
                 usage = response.get("usage", {})
-                span.set_attributes({
+                attributes: dict[str, Any] = {
                     "bedrock.model_id": settings.bedrock_model_id,
                     "bedrock.max_tokens": call_kwargs["inferenceConfig"]["maxTokens"],
                     "bedrock.temperature": call_kwargs["inferenceConfig"]["temperature"],
@@ -194,7 +245,19 @@ def invoke_claude(
                     "bedrock.total_tokens": usage.get("totalTokens", 0),
                     "bedrock.latency_ms": elapsed_ms,
                     "bedrock.stopped_for_tool_use": response.get("stopReason") == "tool_use",
-                })
+                    "mlflow.chat.tokenUsage": {
+                        "input_tokens": usage.get("inputTokens", 0),
+                        "output_tokens": usage.get("outputTokens", 0),
+                        "total_tokens": usage.get("totalTokens", 0),
+                    },
+                }
+                usage_cost = _calculate_usage_cost(usage, settings)
+                if usage_cost:
+                    attributes["mlflow.llm.cost"] = usage_cost
+                    attributes["bedrock.input_cost_usd"] = usage_cost["input_cost"]
+                    attributes["bedrock.output_cost_usd"] = usage_cost["output_cost"]
+                    attributes["bedrock.total_cost_usd"] = usage_cost["total_cost"]
+                span.set_attributes(attributes)
         except Exception as e:
             logger.debug("MLflow span enrichment failed (non-fatal): %s", e)
 

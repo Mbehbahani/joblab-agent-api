@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     bedrock_model_id: str = "us.anthropic.claude-3-5-haiku-20241022-v1:0"
     bedrock_max_tokens: int = 1024
     bedrock_temperature: float = 0.7
+    # Optional explicit pricing override (USD per 1M tokens) for MLflow cost tracing.
+    # When unset, the app uses a small built-in map keyed by exact Anthropic model IDs.
+    bedrock_input_cost_per_million_tokens: float | None = None
+    bedrock_output_cost_per_million_tokens: float | None = None
     # ── Bedrock Embeddings ───────────────────────────────────
     bedrock_embed_model_id: str = "amazon.titan-embed-text-v2:0"
     embed_dimension: int = 512
@@ -34,6 +38,8 @@ class Settings(BaseSettings):
     # ── MLflow Tracking ──────────────────────────────────
     mlflow_tracking_uri: str = "https://mlflow-production-34b0.up.railway.app"
     mlflow_experiment_name: str = "joblab-ai-agent"
+    mlflow_trace_tag_key: str = "trace_purpose"
+    mlflow_trace_tag_value: str = "optimization"
 
     # Direct DB fallback: used when the MLflow REST server is unreachable.
     # Set to a PostgreSQL URI, e.g. postgresql://user:pass@host:port/dbname

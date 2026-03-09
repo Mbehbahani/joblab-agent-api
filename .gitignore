@@ -142,3 +142,5 @@ scripts/
 skills-lock.json
 Mermaid/
 *.mmd
+Mermaid/ai_agent_architecture.mmd
+Mermaid/*.mmd
