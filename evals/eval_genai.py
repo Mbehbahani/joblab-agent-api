@@ -36,6 +36,11 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 logger = logging.getLogger(__name__)
 
+from evals.optimization_contract import (
+    annotate_genai_dataset,
+    summarize_failure_mode_coverage_from_genai,
+)
+
 # ── Constants ───────────────────────────────────────────────────────────────
 
 DATASET_PATH = Path(__file__).parent / "golden_qa_dataset.json"
@@ -56,7 +61,7 @@ def load_dataset(limit: int | None = None) -> list[dict[str, Any]]:
         data = json.load(f)
     if limit:
         data = data[:limit]
-    return data
+    return annotate_genai_dataset(data)
 
 
 # ── Predict Function ────────────────────────────────────────────────────────
@@ -196,7 +201,7 @@ def build_custom_scorers() -> list:
         else:
             return {"score": 1.0, "rationale": f"Response has adequate length ({word_count} words)."}
 
-    return [tool_selection_accuracy, scope_enforcement, response_completeness]
+    return [tool_selection_accuracy, scope_enforcement]
 
 
 # ── Built-in LLM Judge Scorers ─────────────────────────────────────────────
@@ -205,41 +210,12 @@ def build_builtin_scorers(judge_model: str) -> list:
     """
     Build MLflow built-in LLM judge scorers configured to use Bedrock.
 
-    These scorers use an LLM (specified by judge_model) to evaluate the
-    agent's responses. They require litellm + boto3 for Bedrock routing.
+    Single Correctness judge for fast trend tracking during learning.
     """
-    from mlflow.genai.scorers import Correctness, Guidelines, RelevanceToQuery
+    from mlflow.genai.scorers import Correctness
 
     return [
-        # Does the answer match the expected facts?
         Correctness(model=judge_model),
-
-        # Is the answer relevant to what was asked?
-        RelevanceToQuery(model=judge_model),
-
-        # Custom guideline: job market domain focus
-        Guidelines(
-            name="domain_focus",
-            guidelines=(
-                "The answer must be focused on the job market domain. "
-                "It should discuss jobs, hiring, companies, industries, or skills. "
-                "For out-of-scope questions, the agent should politely redirect "
-                "to job-related topics rather than answering the off-topic question."
-            ),
-            model=judge_model,
-        ),
-
-        # Custom guideline: structured data presentation
-        Guidelines(
-            name="data_presentation",
-            guidelines=(
-                "When the question asks for data (counts, trends, lists), "
-                "the answer should present the data in a clear, structured format. "
-                "Numbers should be included when available. "
-                "Lists should be organized. Trends should mention direction."
-            ),
-            model=judge_model,
-        ),
     ]
 
 
@@ -331,6 +307,11 @@ def main():
     # Load dataset
     dataset = load_dataset(args.limit)
     print(f"  Dataset size: {len(dataset)} cases")
+    failure_mode_coverage = summarize_failure_mode_coverage_from_genai(dataset)
+    if failure_mode_coverage:
+        print("  Failure-mode coverage:")
+        for key, count in sorted(failure_mode_coverage.items()):
+            print(f"    {key:35s}: {count}")
 
     if args.dry_run:
         print("\n--- Dry Run (no predictions or scoring) ---\n")
@@ -338,7 +319,11 @@ def main():
             q = row["inputs"]["question"]
             cat = row["expectations"].get("category", "?")
             tool = row["expectations"].get("expected_tool") or "none"
-            print(f"  [{i+1:2d}] [{cat:20s}] tool={tool:25s} | {q}")
+            failure_modes = ",".join(row["expectations"].get("failure_modes", [])) or "none"
+            print(
+                f"  [{i+1:2d}] [{cat:20s}] tool={tool:25s} "
+                f"| failures={failure_modes:45s} | {q}"
+            )
         return
 
     # Initialize MLflow

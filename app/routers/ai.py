@@ -16,9 +16,10 @@ import json
 import logging
 import uuid
 import time
+from contextlib import nullcontext
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, HTTPException, Header, Request
 
 from app.config import get_settings
 from app.schemas.ai import (
@@ -78,6 +79,15 @@ try:
 except ImportError:
     pass
 
+_set_tracing_context_from_http_request_headers = None
+if _mlflow is not None:
+    try:
+        from mlflow.tracing import (
+            set_tracing_context_from_http_request_headers as _set_tracing_context_from_http_request_headers,
+        )
+    except ImportError:
+        _set_tracing_context_from_http_request_headers = None
+
 router = APIRouter(prefix="/ai", tags=["ai"])
 
 # ── System prompt from policy layer (replaces monolithic string) ────────────
@@ -128,6 +138,14 @@ DB_RELATED_KEYWORDS = [
     "detail",
     "more about",
 ]
+
+
+def _safe_logged_model_name(base_name: str, version: str) -> str:
+    safe_version = version.replace(".", "_")
+    return f"{base_name}-v{safe_version}"
+
+
+LINKED_PROMPTS_TAG = "mlflow.linkedPrompts"
 
 def _is_database_related(prompt: str) -> bool:
     prompt_lower = prompt.lower()
@@ -311,7 +329,7 @@ def _base_trace_tags(
     responses={500: {"model": ErrorResponse}},
     summary="Ask the AI model a question (with tool calling)",
 )
-async def ask(body: AskRequest):
+async def ask(request: Request, body: AskRequest):
     """
     Agent orchestration loop with confidence gating and per-turn logging.
 
@@ -324,6 +342,26 @@ async def ask(body: AskRequest):
       6. Apply confidence gate (ANSWER / ASK_CLARIFICATION / DECLINE / HANDOFF).
     """
     settings = get_settings()
+    default_experiment_name = settings.mlflow_experiment_name
+    default_active_model_name = _safe_logged_model_name(
+        settings.mlflow_active_model_name,
+        settings.app_version,
+    )
+    override_experiment_name = request.headers.get("x-mlflow-experiment-name", "").strip()
+    override_active_model_name = request.headers.get("x-mlflow-active-model-name", "").strip()
+    override_prompt_name = request.headers.get("x-mlflow-prompt-name", "").strip()
+    override_prompt_version = request.headers.get("x-mlflow-prompt-version", "").strip()
+    override_prompt_uri = request.headers.get("x-mlflow-prompt-uri", "").strip()
+    routing_override_active = False
+
+    if _mlflow and override_experiment_name:
+        try:
+            _mlflow.set_experiment(override_experiment_name)
+            if override_active_model_name:
+                _mlflow.set_active_model(name=override_active_model_name)
+            routing_override_active = True
+        except Exception as _exc:
+            logger.debug("MLflow per-request routing override failed: %s", _exc)
 
     # ── Initialize turn tracking (must be before MLflow so conversation_id exists) ──
     turn_id = str(uuid.uuid4())
@@ -340,15 +378,38 @@ async def ask(body: AskRequest):
     _lite_client = None
     _lite_trace_events: list[dict[str, Any]] = []
 
-    # ── MLflow: create a root AGENT trace for the full orchestration ────
+    tracing_context_cm = nullcontext()
+    tracing_context_entered = False
+    request_headers = dict(request.headers)
+    if (
+        _set_tracing_context_from_http_request_headers is not None
+        and ("traceparent" in request_headers or "Traceparent" in request_headers)
+    ):
+        try:
+            tracing_context_cm = _set_tracing_context_from_http_request_headers(
+                request_headers
+            )
+        except Exception as _exc:
+            logger.debug("MLflow distributed trace context setup failed: %s", _exc)
+
+    # Keep the distributed tracing context active for the full request lifetime.
+    try:
+        tracing_context_cm.__enter__()
+        tracing_context_entered = True
+    except Exception as _exc:
+        logger.debug("MLflow distributed trace context enter failed: %s", _exc)
+        tracing_context_cm = nullcontext()
+        tracing_context_cm.__enter__()
+        tracing_context_entered = True
+
+    # ── MLflow: create a root/child AGENT trace for the full orchestration ───
     _agent_span = None
     _agent_span_ctx = None
     _trace_id = None
     if _mlflow and _SpanType:
         try:
-            # MLflow 3.x: start_span returns a context manager;
-            # we call __enter__ manually so the span stays open across
-            # the whole function and is closed in _finalize_turn.
+            # If the caller propagated MLflow trace context headers, this span
+            # becomes part of the caller trace instead of starting a detached one.
             _agent_span_ctx = _mlflow.start_span(
                 name="ask_agent",
                 span_type=_SpanType.AGENT,
@@ -359,12 +420,20 @@ async def ask(body: AskRequest):
                 "conversation_id": conversation_id,
             })
             _trace_id = _agent_span.trace_id
-            # Attach session + user metadata so traces are queryable
+            trace_tag_updates = dict(trace_tags)
+            if override_prompt_name and override_prompt_version:
+                trace_tag_updates[LINKED_PROMPTS_TAG] = json.dumps(
+                    [{"name": override_prompt_name, "version": override_prompt_version}]
+                )
+            if override_prompt_uri:
+                trace_tag_updates["prompt_uri"] = override_prompt_uri
+            if override_prompt_version:
+                trace_tag_updates["prompt_version"] = override_prompt_version
             _mlflow.update_current_trace(
                 metadata={
                     "mlflow.trace.session": conversation_id,
                 },
-                tags=trace_tags,
+                tags=trace_tag_updates,
             )
         except Exception as _exc:
             logger.debug("MLflow span creation failed: %s", _exc)
@@ -396,13 +465,15 @@ async def ask(body: AskRequest):
         except Exception as _exc:
             logger.debug("MLflow Lite trace start failed: %s", _exc)
 
+    effective_system_prompt = body.system or JOBLAB_SYSTEM
+
     turn_record = TurnRecord(
         conversation_id=conversation_id,
         turn_id=turn_id,
         user_prompt=body.prompt,
         prompt_char_count=len(body.prompt),
         policy_version=POLICY_VERSION,
-        system_prompt_chars=len(JOBLAB_SYSTEM),
+        system_prompt_chars=len(effective_system_prompt),
     )
 
     def _lite_append_event(kind: str, payload: dict[str, Any]) -> None:
@@ -431,6 +502,23 @@ async def ask(body: AskRequest):
         error: str | None = None,
     ) -> AskResponse:
         """Helper: finalize turn record, log, and return response."""
+        def _restore_mlflow_route_override() -> None:
+            if not (_mlflow and routing_override_active):
+                return
+            try:
+                _mlflow.set_experiment(default_experiment_name)
+                _mlflow.set_active_model(name=default_active_model_name)
+            except Exception as _exc:
+                logger.debug("MLflow per-request routing restore failed: %s", _exc)
+
+        def _close_distributed_trace_context() -> None:
+            if not tracing_context_entered:
+                return
+            try:
+                tracing_context_cm.__exit__(None, None, None)
+            except Exception as _exc:
+                logger.debug("MLflow distributed trace context exit failed: %s", _exc)
+
         turn_record.total_latency_ms = round(timer.total_ms(), 1)
         turn_record.llm_latency_ms = timer.get("llm")
         turn_record.tool_latency_ms = timer.get("tool")
@@ -446,6 +534,47 @@ async def ask(body: AskRequest):
             turn_record.total_tokens = (
                 turn_record.input_tokens + turn_record.output_tokens
             )
+
+        # Add final turn state to the full MLflow trace so it is filterable
+        # and visible in the trace table/dashboard, not only inside span outputs.
+        if _mlflow and _trace_id:
+            try:
+                _mlflow.update_current_trace(
+                    tags={
+                        "gate_outcome": gate_outcome,
+                        "gate_confidence": f"{gate_confidence:.6f}",
+                        "gate_reason": gate_reason[:200],
+                        "result_type": result_type,
+                        "tool_calls_count": str(len(tool_calls or [])),
+                    }
+                )
+            except Exception as _exc:
+                logger.debug("MLflow trace tag update failed: %s", _exc)
+            try:
+                from mlflow.entities import AssessmentSource, AssessmentSourceType
+
+                assessment_source = AssessmentSource(
+                    source_type=AssessmentSourceType.CODE,
+                    source_id="confidence_gate",
+                )
+                _mlflow.log_feedback(
+                    trace_id=_trace_id,
+                    name="turn_outcome",
+                    value=gate_outcome,
+                    rationale=gate_reason or f"Turn completed with outcome {gate_outcome}.",
+                    source=assessment_source,
+                    metadata={"result_type": result_type},
+                )
+                _mlflow.log_feedback(
+                    trace_id=_trace_id,
+                    name="gate_confidence",
+                    value=round(gate_confidence, 6),
+                    rationale=gate_reason or "Confidence assigned by confidence_gate.",
+                    source=assessment_source,
+                    metadata={"result_type": result_type},
+                )
+            except Exception as _exc:
+                logger.debug("MLflow trace assessment logging failed: %s", _exc)
 
         # Finalize MLflow Lite trace (if active)
         if _lite_client and _trace_id:
@@ -517,6 +646,9 @@ async def ask(body: AskRequest):
                 _agent_span_ctx.__exit__(None, None, None)
             except Exception:
                 pass
+
+        _close_distributed_trace_context()
+        _restore_mlflow_route_override()
 
         return AskResponse(
             answer=answer,
@@ -630,7 +762,11 @@ async def ask(body: AskRequest):
             },
         ]
         with timer.track("llm"):
-            raw = invoke_claude(messages=messages, system=JOBLAB_SYSTEM, tools=[])
+                raw = invoke_claude(
+                    messages=messages,
+                    system=effective_system_prompt,
+                    tools=[],
+                )
         usage = get_usage(raw)
         _lite_append_event(
             "llm",
@@ -666,8 +802,9 @@ async def ask(body: AskRequest):
 
     # ── Normal flow ─────────────────────────────────────────────────────
 
-    # Use the dedicated system prompt; ignore any client-supplied one
-    system = JOBLAB_SYSTEM
+    # Use the dedicated system prompt by default, but allow explicit override
+    # for MLflow prompt evaluation/optimization workflows.
+    system = effective_system_prompt
 
     # Retrieve last tool memory for follow-up refinement
     last_tool_name, last_tool_args = get_last_tool(conversation_id)

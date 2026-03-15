@@ -155,7 +155,7 @@ def _get_experiment_name() -> str:
         from app.config import get_settings
         return get_settings().mlflow_experiment_name
     except Exception:
-        return "joblab-ai-agent"  # local dev fallback; Lambda sets this via MLFLOW_EXPERIMENT_NAME env var
+        return "joblab-ai-agent-production"  # local dev fallback; Lambda sets this via MLFLOW_EXPERIMENT_NAME env var
 
 
 def _ensure_experiment() -> None:

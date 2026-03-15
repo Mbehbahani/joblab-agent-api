@@ -2,6 +2,7 @@
 FastAPI application entry-point.
 """
 
+import hashlib
 import logging
 
 from fastapi import FastAPI
@@ -9,8 +10,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.routers import health, ai, cv_match
+from app.services.prompt_policy import DEFAULT_POLICY, get_system_prompt
 
 settings = get_settings()
+
+
+def _safe_logged_model_name(base_name: str, version: str) -> str:
+    safe_version = version.replace(".", "_")
+    return f"{base_name}-v{safe_version}"
 
 # ── Logging ─────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -82,7 +89,61 @@ try:
             settings.mlflow_default_artifact_root,
         )
 
-    mlflow.set_experiment(settings.mlflow_experiment_name)
+    experiment = mlflow.set_experiment(settings.mlflow_experiment_name)
+
+    # Link all new traces to a stable LoggedModel representing this agent version.
+    try:
+        _active_model_name = _safe_logged_model_name(
+            settings.mlflow_active_model_name,
+            settings.app_version,
+        )
+        _existing_models = mlflow.search_logged_models(
+            experiment_ids=[experiment.experiment_id],
+            filter_string=f"name = '{_active_model_name}'",
+            max_results=1,
+            output_format="list",
+        )
+        if _existing_models:
+            _logged_model = _existing_models[0]
+        else:
+            _logged_model = mlflow.create_external_model(
+                name=_active_model_name,
+                experiment_id=experiment.experiment_id,
+                model_type="agent",
+                tags={
+                    "app_name": settings.app_name,
+                    "app_version": settings.app_version,
+                    "agent_kind": "joblab_agent",
+                },
+            )
+
+        _system_prompt = get_system_prompt()
+        _policy_meta = DEFAULT_POLICY.metadata()
+        mlflow.set_active_model(model_id=_logged_model.model_id)
+        mlflow.log_model_params(
+            {
+                "app_version": settings.app_version,
+                "prompt_policy_version": str(_policy_meta["policy_version"]),
+                "prompt_active_sections": ",".join(_policy_meta["active_sections"]),
+                "prompt_section_count": str(len(_policy_meta["active_sections"])),
+                "prompt_char_count": str(_policy_meta["prompt_char_count"]),
+                "prompt_sha256": hashlib.sha256(_system_prompt.encode("utf-8")).hexdigest(),
+                "llm_provider": "bedrock",
+                "llm_model": settings.bedrock_model_id,
+                "temperature": str(settings.bedrock_temperature),
+                "max_tokens": str(settings.bedrock_max_tokens),
+                "embedding_model": settings.bedrock_embed_model_id,
+                "embedding_dimension": str(settings.embed_dimension),
+            },
+            model_id=_logged_model.model_id,
+        )
+        _log.info(
+            "MLflow active model set — name=%s, model_id=%s",
+            _active_model_name,
+            _logged_model.model_id,
+        )
+    except Exception as _model_exc:
+        _log.warning("MLflow active model init failed (non-fatal): %s", _model_exc)
 
     # Auto-trace all Bedrock API calls (converse, invoke_model, etc.).
     # For async trace shipping, set env var MLFLOW_ASYNC_LOGGING=true

@@ -37,7 +37,8 @@ class Settings(BaseSettings):
 
     # ── MLflow Tracking ──────────────────────────────────
     mlflow_tracking_uri: str = "https://mlflow-production-34b0.up.railway.app"
-    mlflow_experiment_name: str = "joblab-ai-agent"
+    mlflow_experiment_name: str = "joblab-ai-agent-production"
+    mlflow_active_model_name: str = "joblab-ai-agent"
     mlflow_trace_tag_key: str = "trace_purpose"
     mlflow_trace_tag_value: str = "optimization"
 

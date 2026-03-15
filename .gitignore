@@ -144,3 +144,6 @@ Mermaid/
 *.mmd
 Mermaid/ai_agent_architecture.mmd
 Mermaid/*.mmd
+OPTIMIZATION/
+.amazonq/
+MLFLOW_STEPS/run_opnow_pipeline.py

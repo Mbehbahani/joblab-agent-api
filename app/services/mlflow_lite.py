@@ -6,7 +6,7 @@ limit), this module provides experiment‑tracking via the MLflow Tracking
 Server REST API. It supports:
   - Turn-level run logging (metrics / params / tags)
   - Trace lifecycle logging via trace REST endpoints
-  - Trace feedback tags (for lightweight /feedback fallback)
+  - Trace feedback assessments for lightweight /feedback fallback
 
 Requirements: only ``requests`` (already in the Lambda package).
 
@@ -152,6 +152,15 @@ class MLflowLiteClient:
         if normalized in {"FAILED", "FAILURE"}:
             return "ERROR"
         return "OK"
+
+    @staticmethod
+    def _proto_timestamp_now() -> str:
+        """Return an RFC 3339 timestamp string compatible with protobuf JSON."""
+        return (
+            datetime.now(timezone.utc)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
 
     @staticmethod
     def _make_trace_metadata_items(data: dict[str, Any]) -> list[dict[str, str]]:
@@ -473,6 +482,46 @@ class MLflowLiteClient:
             return
         for key, value in tags.items():
             self.set_trace_tag(trace_id, key, value)
+
+    def _create_feedback_assessment(
+        self,
+        *,
+        trace_id: str,
+        name: str,
+        value: Any,
+        rationale: str = "",
+        source_type: str = "HUMAN",
+        source_id: str = "ai_explorer_ui",
+    ) -> bool:
+        """Create an MLflow trace assessment via the v3 REST API."""
+        if not trace_id:
+            return False
+
+        now = self._proto_timestamp_now()
+        payload: dict[str, Any] = {
+            "assessment": {
+                "assessment_name": name,
+                "trace_id": trace_id,
+                "source": {
+                    "source_type": source_type,
+                    "source_id": source_id,
+                },
+                "create_time": now,
+                "last_update_time": now,
+                "feedback": {"value": value},
+                "valid": True,
+            }
+        }
+        if rationale:
+            payload["assessment"]["rationale"] = rationale[:2000]
+
+        result = self._api(
+            "POST",
+            f"/api/3.0/mlflow/traces/{trace_id}/assessments",
+            json=payload,
+            timeout=8,
+        )
+        return result is not None
 
     def end_trace(
         self,
@@ -856,23 +905,49 @@ class MLflowLiteClient:
         *,
         spool_on_failure: bool = True,
     ) -> bool:
-        """Attach lightweight feedback tags to a trace."""
+        """Attach feedback assessments to a trace so MLflow quality views can use them."""
         if not trace_id:
             return False
-        ok = self.set_trace_tag(
-            trace_id,
-            "feedback.thumbs_up",
-            str(thumbs_up).lower(),
-            spool_on_failure=False,
+        rationale = (
+            comment[:1000]
+            if comment
+            else (
+                "User indicated response was helpful"
+                if thumbs_up
+                else "User indicated response was not helpful"
+            )
         )
-        if comment:
-            ok = self.set_trace_tag(
+
+        ok = self._create_feedback_assessment(
+            trace_id=trace_id,
+            name="user_satisfaction",
+            value=thumbs_up,
+            rationale=rationale,
+        )
+        if ok and comment:
+            self._create_feedback_assessment(
+                trace_id=trace_id,
+                name="user_comment",
+                value=comment[:1000],
+            )
+
+        if ok:
+            self.set_trace_tag(
                 trace_id,
-                "feedback.comment",
-                comment[:1000],
+                "feedback.thumbs_up",
+                str(thumbs_up).lower(),
                 spool_on_failure=False,
-            ) and ok
-        if not ok and spool_on_failure:
+            )
+            if comment:
+                self.set_trace_tag(
+                    trace_id,
+                    "feedback.comment",
+                    comment[:1000],
+                    spool_on_failure=False,
+                )
+            return True
+
+        if spool_on_failure:
             self._spool_put(
                 "trace_feedback",
                 {
@@ -881,7 +956,7 @@ class MLflowLiteClient:
                     "comment": comment[:1000],
                 },
             )
-        return ok
+        return False
 
     def log_offline_trace_feedback(
         self,

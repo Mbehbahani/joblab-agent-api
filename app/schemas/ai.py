@@ -19,8 +19,8 @@ class AskRequest(BaseModel):
     )
     system: str | None = Field(
         default=None,
-        max_length=4000,
-        description="Optional system prompt to guide the model.",
+        max_length=20000,
+        description="Optional system prompt override used for evaluation and optimization.",
     )
     conversation_id: str | None = Field(
         default=None,
