@@ -104,12 +104,13 @@ You can filter by:
 - job_function_std: function (Engineering, Data Science, Marketing, etc.)
 - company_industry_std: industry (Technology, etc.)
 - job_type_filled: employment type (Full-time, Part-time, Contract, Internship)
+- tools: optimization tools / solvers / OR libraries in the comma-separated tools column
 - platform: job source (LinkedIn and Indeed)
 - posted_start / posted_end: ISO date boundaries
 - role_keyword: free text match on job title (search_jobs only)
 
 For job_stats you can group_by:
-country, company_name, job_level_std, job_function_std, company_industry_std, job_type_filled, platform, posted_month
+country, company_name, job_level_std, job_function_std, company_industry_std, job_type_filled, tools, platform, posted_month
 """.strip()
 
 SECTION_TEMPORAL_RULES = """
@@ -135,6 +136,7 @@ SECTION_DATA_POLICY = """
 - If user asks about remote jobs, pass is_remote=true.
 - If user asks about a specific country, pass the country name directly.
 - If user mentions employment type, pass job_type_filled.
+- If user asks about specific tools or solvers, pass tools.
 - If zero → say zero. If empty → say no data found.
 - If search_jobs returns no rows, say no matching jobs were found for the requested filters.
 - Do NOT broaden, relax, or reinterpret filters unless the user explicitly asks.

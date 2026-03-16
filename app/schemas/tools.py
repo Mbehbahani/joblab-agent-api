@@ -20,6 +20,7 @@ ALLOWED_GROUP_BY = frozenset(
         "job_function_std",
         "company_industry_std",
         "job_type_filled",
+        "tools",
         "platform",
         "posted_month",
     ]
@@ -38,6 +39,8 @@ SAFE_COLUMNS = [
     "job_function_std",
     "company_industry_std",
     "job_type_filled",
+    "skills",
+    "tools",
     "platform",
     "posted_date",
     "url",
@@ -71,6 +74,7 @@ class SearchJobsInput(BaseModel):
     job_function_std: Optional[str] = None
     company_industry_std: Optional[str] = None
     job_type_filled: Optional[str] = None
+    tools: Optional[str] = None
     platform: Optional[str] = None
     posted_start: Optional[str] = None
     posted_end: Optional[str] = None
@@ -105,6 +109,7 @@ class JobStatsInput(BaseModel):
     is_remote: Optional[bool] = None
     is_research: Optional[bool] = None
     job_type_filled: Optional[str] = None
+    tools: Optional[str] = None
     posted_start: Optional[str] = None
     posted_end: Optional[str] = None
 

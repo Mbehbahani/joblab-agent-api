@@ -38,6 +38,9 @@ class AskResponse(BaseModel):
     model: str
     usage: dict | None = None
     tool_calls: list[dict] | None = None
+    job_results: list[dict] | None = None
+    gate_outcome: str | None = None
+    result_type: str | None = None
     conversation_id: str | None = None
     turn_id: str | None = Field(
         default=None,

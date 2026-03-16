@@ -175,6 +175,40 @@ def _extract_jobs_from_results(tool_name: str, result_data: Any) -> list[dict[st
         })
     return jobs
 
+def _build_ai_job_results(tool_name: str | None, result_data: Any) -> list[dict[str, Any]] | None:
+    """
+    Build a frontend-friendly job list payload for AI answers.
+    Only listing-style tools should expose structured job cards.
+    """
+    if tool_name not in {"search_jobs", "semantic_search_jobs"}:
+        return None
+    if not isinstance(result_data, list):
+        return None
+
+    jobs: list[dict[str, Any]] = []
+    for row in result_data[:10]:
+        job_id = row.get("job_id")
+        if not job_id:
+            continue
+        jobs.append({
+            "job_id": job_id,
+            "actual_role": row.get("actual_role", ""),
+            "company_name": row.get("company_name", ""),
+            "country": row.get("country", ""),
+            "location": row.get("location", ""),
+            "url": row.get("url", ""),
+            "posted_date": row.get("posted_date", ""),
+            "job_level_std": row.get("job_level_std", ""),
+            "job_function_std": row.get("job_function_std", ""),
+            "job_type_filled": row.get("job_type_filled", ""),
+            "platform": row.get("platform", ""),
+            "is_remote": row.get("is_remote"),
+            "is_research": row.get("is_research"),
+            "skills": row.get("skills", ""),
+            "tools": row.get("tools", ""),
+        })
+    return jobs or None
+
 def _is_job_detail_followup(prompt: str) -> bool:
     """Detect if user is asking about a previously mentioned job."""
     prompt_lower = prompt.lower()
@@ -272,6 +306,7 @@ def _build_followup_args(tool_name: str, tool_args: dict) -> tuple[str, dict]:
             "is_remote",
             "is_research",
             "job_type_filled",
+            "tools",
             "posted_start",
             "posted_end",
         ):
@@ -288,6 +323,7 @@ def _build_followup_args(tool_name: str, tool_args: dict) -> tuple[str, dict]:
             "is_remote",
             "is_research",
             "job_type_filled",
+            "tools",
             "posted_start",
             "posted_end",
         ):
@@ -495,6 +531,7 @@ async def ask(request: Request, body: AskRequest):
         answer: str,
         usage: dict | None,
         tool_calls: list[dict] | None,
+        job_results: list[dict] | None = None,
         gate_outcome: str = "ANSWER",
         gate_confidence: float = 1.0,
         gate_reason: str = "",
@@ -655,6 +692,9 @@ async def ask(request: Request, body: AskRequest):
             model=settings.bedrock_model_id,
             usage=usage,
             tool_calls=tool_calls or None,
+            job_results=job_results or None,
+            gate_outcome=gate_outcome,
+            result_type=result_type,
             conversation_id=conversation_id,
             turn_id=turn_id,
             trace_id=_trace_id,
@@ -795,6 +835,7 @@ async def ask(request: Request, body: AskRequest):
             answer=answer,
             usage=usage,
             tool_calls=[{"name": exec_tool_name, "input": exec_tool_args}],
+            job_results=_build_ai_job_results(exec_tool_name, result_data),
             gate_outcome=gate.outcome.value,
             gate_confidence=gate.confidence,
             gate_reason=gate.reason,
@@ -882,6 +923,7 @@ async def ask(request: Request, body: AskRequest):
     collected_tool_calls: list[dict[str, Any]] = []
     last_gate_decision = None
     last_result_data = None
+    last_result_tool_name: str | None = None
 
     try:
         for _round in range(MAX_TOOL_ROUNDS):
@@ -970,6 +1012,7 @@ async def ask(request: Request, body: AskRequest):
                     answer=answer,
                     usage=raw_usage,
                     tool_calls=collected_tool_calls or None,
+                    job_results=_build_ai_job_results(last_result_tool_name, last_result_data),
                     gate_outcome=gate_outcome,
                     gate_confidence=gate_confidence,
                     gate_reason=gate_reason,
@@ -1089,6 +1132,7 @@ async def ask(request: Request, body: AskRequest):
                 if executor is not None and tool_error is None:
                     set_last_tool(conversation_id, tool_name, tool_input)
                     last_result_data = result_data
+                    last_result_tool_name = tool_name
 
                     # Store mentioned jobs for follow-up context
                     if tool_name in ("search_jobs", "semantic_search_jobs"):
@@ -1127,6 +1171,7 @@ async def ask(request: Request, body: AskRequest):
             answer=answer or "I was unable to complete the request within the allowed steps.",
             usage=raw_usage,
             tool_calls=collected_tool_calls or None,
+            job_results=_build_ai_job_results(last_result_tool_name, last_result_data),
             gate_outcome=gate_outcome,
             gate_confidence=gate_confidence,
             gate_reason=gate_reason,

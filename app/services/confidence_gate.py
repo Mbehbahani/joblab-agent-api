@@ -122,6 +122,7 @@ def _extract_signals(
     filter_keys = [
         "country", "is_remote", "is_research", "job_level_std",
         "job_function_std", "company_industry_std", "job_type_filled",
+        "tools",
         "platform", "posted_start", "posted_end", "role_keyword",
     ]
     provided_filters = sum(1 for k in filter_keys if tool_input.get(k) is not None)

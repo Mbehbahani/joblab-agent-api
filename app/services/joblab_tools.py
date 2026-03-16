@@ -57,6 +57,7 @@ def _apply_common_filters(
     is_remote: bool | None,
     is_research: bool | None,
     job_type_filled: str | None = None,
+    tools: str | None = None,
     posted_start: str | None,
     posted_end: str | None,
 ) -> None:
@@ -76,6 +77,8 @@ def _apply_common_filters(
         qs["is_research"] = f"eq.{str(is_research).lower()}"
     if job_type_filled and isinstance(job_type_filled, str) and job_type_filled.strip():
         qs["job_type_filled"] = f"ilike.%{job_type_filled.strip()}%"
+    if tools and isinstance(tools, str) and tools.strip():
+        qs["tools"] = f"ilike.%{tools.strip()}%"
 
     if posted_start and posted_end:
         qs["and"] = f"(posted_date.gte.{posted_start},posted_date.lte.{posted_end})"
@@ -121,6 +124,7 @@ def execute_search_jobs(raw_input: dict[str, Any]) -> list[dict[str, Any]]:
         is_remote=params.is_remote,
         is_research=params.is_research,
         job_type_filled=params.job_type_filled,
+        tools=params.tools,
         posted_start=params.posted_start,
         posted_end=params.posted_end,
     )
@@ -205,6 +209,7 @@ def execute_job_stats(raw_input: dict[str, Any]) -> list[dict[str, Any]]:
         is_remote=params.is_remote,
         is_research=params.is_research,
         job_type_filled=params.job_type_filled,
+        tools=params.tools,
         posted_start=params.posted_start,
         posted_end=params.posted_end,
     )
@@ -262,6 +267,7 @@ def execute_job_stats(raw_input: dict[str, Any]) -> list[dict[str, Any]]:
         "job_function_std": getattr(params, "job_function_std", None),
         "company_industry_std": getattr(params, "company_industry_std", None),
         "job_type_filled": params.job_type_filled,
+        "tools": params.tools,
         "platform": getattr(params, "platform", None),
     }
     dimension_filter_value = group_dimension_filters.get(params.group_by)
@@ -284,6 +290,18 @@ def execute_job_stats(raw_input: dict[str, Any]) -> list[dict[str, Any]]:
     counts: dict[str, int] = {}
     col = params.group_by
     for row in rows:
+        if col == "tools":
+            raw_tools = row.get("tools")
+            if not raw_tools:
+                counts["Unknown"] = counts.get("Unknown", 0) + 1
+                continue
+            tool_items = [item.strip() for item in str(raw_tools).split(",") if item.strip()]
+            if not tool_items:
+                counts["Unknown"] = counts.get("Unknown", 0) + 1
+                continue
+            for tool_name in tool_items:
+                counts[tool_name] = counts.get(tool_name, 0) + 1
+            continue
         key = row.get(col) or "Unknown"
         counts[key] = counts.get(key, 0) + 1
 
@@ -370,7 +388,11 @@ def execute_semantic_search(raw_input: dict[str, Any]) -> list[dict[str, Any]]:
         meta_url = f"{_base_url()}/jobs"
         # PostgREST: in filter for job_id
         meta_qs = {
-            "select": "job_id,actual_role,company_name,country,location,url,posted_date,job_level_std,is_remote",
+            "select": (
+                "job_id,actual_role,company_name,country,location,url,posted_date,"
+                "job_level_std,job_function_std,job_type_filled,platform,is_remote,"
+                "is_research,skills,tools"
+            ),
             "job_id": f"in.({','.join(unique_job_ids)})",
         }
         meta_resp = requests.get(meta_url, headers=_headers(), params=meta_qs, timeout=15)
@@ -407,7 +429,13 @@ def execute_semantic_search(raw_input: dict[str, Any]) -> list[dict[str, Any]]:
             "url": meta.get("url", ""),
             "posted_date": posted_date or "",
             "job_level_std": meta.get("job_level_std", ""),
+            "job_function_std": meta.get("job_function_std", ""),
+            "job_type_filled": meta.get("job_type_filled", ""),
+            "platform": meta.get("platform", ""),
             "is_remote": meta.get("is_remote"),
+            "is_research": meta.get("is_research"),
+            "skills": meta.get("skills", "") or "",
+            "tools": meta.get("tools", "") or "",
             "chunk_text": row.get("chunk_text", ""),
             "similarity": round(float(row.get("similarity", 0)), 4),
         })
@@ -492,6 +520,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                             "type": "string",
                             "description": "Employment type (e.g. Full-time, Part-time, Contract, Internship)",
                         },
+                        "tools": {
+                            "type": "string",
+                            "description": "Optimization tool filter matched against the comma-separated tools column (e.g. Gurobi, Pyomo, OR-Tools, CPLEX).",
+                        },
                         "platform": {
                             "type": "string",
                             "description": "Job platform source (e.g. LinkedIn, Indeed, Glassdoor)",
@@ -536,6 +568,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                                 "job_function_std",
                                 "company_industry_std",
                                 "job_type_filled",
+                                "tools",
                                 "platform",
                                 "posted_month",
                             ],
@@ -547,6 +580,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                         "job_type_filled": {
                             "type": "string",
                             "description": "Optional employment type filter (e.g. Full-time, Part-time, Contract, Internship)",
+                        },
+                        "tools": {
+                            "type": "string",
+                            "description": "Optional optimization tool filter matched against the comma-separated tools column (e.g. Gurobi, Pyomo, OR-Tools, CPLEX)",
                         },
                         "posted_start": {
                             "type": "string",
