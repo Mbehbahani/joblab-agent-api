@@ -47,7 +47,7 @@ DATASET_PATH = Path(__file__).parent / "golden_qa_dataset.json"
 
 # Default judge model: use the same Bedrock Claude model as the agent
 # Format: <provider>:/<model-name>  (litellm routing)
-DEFAULT_JUDGE_MODEL = "bedrock:/us.anthropic.claude-3-5-haiku-20241022-v1:0"
+DEFAULT_JUDGE_MODEL = "bedrock:/us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 # Local backend URL (the predict function calls the running server)
 _backend_url = "http://localhost:8000"

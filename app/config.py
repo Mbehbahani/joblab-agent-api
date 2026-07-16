@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     # Note: AWS_REGION is automatically provided by Lambda environment
     # For local dev, you can set it or use boto3's automatic detection
     aws_region: str = "us-east-1"  # Default, will be overridden by Lambda's AWS_REGION
-    bedrock_model_id: str = "us.anthropic.claude-3-5-haiku-20241022-v1:0"
+    bedrock_model_id: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     bedrock_max_tokens: int = 1024
     bedrock_temperature: float = 0.7
     # Optional explicit pricing override (USD per 1M tokens) for MLflow cost tracing.

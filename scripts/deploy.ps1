@@ -254,7 +254,7 @@ if ($LASTEXITCODE -ne 0) {
     }
     
     # Set defaults for missing values
-    if (-not $EnvVars["BEDROCK_MODEL_ID"]) { $EnvVars["BEDROCK_MODEL_ID"] = "us.anthropic.claude-3-5-haiku-20241022-v1:0" }
+    if (-not $EnvVars["BEDROCK_MODEL_ID"]) { $EnvVars["BEDROCK_MODEL_ID"] = "us.anthropic.claude-haiku-4-5-20251001-v1:0" }
     if (-not $EnvVars["BEDROCK_MAX_TOKENS"]) { $EnvVars["BEDROCK_MAX_TOKENS"] = "1024" }
     if (-not $EnvVars["BEDROCK_TEMPERATURE"]) { $EnvVars["BEDROCK_TEMPERATURE"] = "0.7" }
     if (-not $EnvVars["SUPABASE_URL"]) { $EnvVars["SUPABASE_URL"] = "" }

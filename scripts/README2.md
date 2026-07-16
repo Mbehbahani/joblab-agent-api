@@ -205,7 +205,7 @@ Keep last 3 working packages for quick rollback.
 .\scripts\update-environment.ps1
 
 # Update specific variable
-.\scripts\update-environment.ps1 -Key "BEDROCK_MODEL_ID" -Value "us.anthropic.claude-3-5-haiku-20241022-v1:0"
+.\scripts\update-environment.ps1 -Key "BEDROCK_MODEL_ID" -Value "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 ```
 
 **Common use cases:**

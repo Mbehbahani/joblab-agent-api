@@ -71,7 +71,7 @@ DATASET_SOURCE = PROJECT_ROOT / "evals" / "optimization_baseline_dataset.json"
 
 # ── LLM (Agent) ───────────────────────────────────────────────────────────
 # This is the model your agent uses for conversation.
-LLM_MODEL_NAME = "us.anthropic.claude-3-5-haiku-20241022-v1:0"
+LLM_MODEL_NAME = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 LLM_TEMPERATURE = 0.7
 LLM_MAX_TOKENS = 1024
 
