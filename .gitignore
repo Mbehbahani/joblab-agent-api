@@ -94,7 +94,6 @@ scripts/README2.md
 
 # Sensitive / credential files
 .env
-.env.example
 evals/dagshub.env
 secrets.yml
 credentials.json
