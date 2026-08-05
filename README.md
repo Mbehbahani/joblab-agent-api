@@ -1,4 +1,10 @@
-# JobLab Agent API
+# Job Agent Backend [job.oploy.eu](https://job.oploy.eu)
+
+<p align="center">
+  <a href="https://job.oploy.eu/">
+    <img src="./Readme/job-agent-backend.jpg" alt="Job Agent Backend architecture illustration" width="58%" />
+  </a>
+</p>
 
 FastAPI backend for **AI-powered** job search, **CV matching**, **tool-calling** agent workflows, and **MLflow**-traced evaluation, deployed on **AWS Lambda**.
 
