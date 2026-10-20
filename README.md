@@ -6,15 +6,13 @@
   </a>
 </p>
 
-FastAPI backend for **AI-powered** job search, **CV matching**, **tool-calling** agent workflows, and **MLflow**-traced evaluation, deployed on **AWS Lambda**.
+FastAPI job-search and CV-matching API with a Bedrock tool-calling loop, MLflow tracing and AWS Lambda deployment
 
 ![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-Agent%20API-009688?logo=fastapi&logoColor=white)
 ![AWS Lambda](https://img.shields.io/badge/AWS-Lambda-FF9900?logo=awslambda&logoColor=white)
 ![Amazon Bedrock](https://img.shields.io/badge/Amazon-Bedrock-232F3E?logo=amazon-aws&logoColor=white)
 ![MLflow](https://img.shields.io/badge/MLflow-Observability%20%26%20Evaluation-0194E2?logo=mlflow&logoColor=white)
-
-> ⭐ If this repository is useful for your work or research, consider starring it.
 
 ## Overview
 
@@ -24,12 +22,12 @@ This is the AI backend behind the **JobLab** product family. It runs a **custom 
 - **CV matching** using Bedrock Titan embeddings and similarity scoring against job postings
 - **Direct, structured job search** against a **Supabase**-backed dataset
 
-It also carries a full **MLOps layer**: every chat turn is traced through **MLflow**, with a 4-stage pipeline (`MLFLOW_STEPS/`) for experiment setup, asset registration, baseline evaluation, and iterative prompt/agent optimization.
+The backend includes **MLflow** tracing and a 4-stage workflow (`MLFLOW_STEPS/`) for experiment setup, asset registration, baseline evaluation, and iterative prompt/agent optimization.
 
 **This repository is best described as:**
 
 - A custom Bedrock agent loop (Claude Haiku 4.5) with three callable tools, not a framework wrapper
-- A production evaluation harness — MLflow tracing, custom scorers, and an optimization loop, not just an inference endpoint
+- An evaluation workflow with MLflow tracing, custom scorers and prompt/agent comparisons
 - A serverless deployment — FastAPI + Mangum on AWS Lambda behind API Gateway
 
 ## Tech stack
@@ -107,7 +105,7 @@ flowchart LR
 
 Beyond inference, this repo carries a full experimentation layer under [`MLFLOW_STEPS/`](MLFLOW_STEPS/) and [`evals/`](evals/):
 
-- **Production tracing** — every chat turn, tool call, and latency logged via [`app/services/mlflow_lite.py`](app/services/mlflow_lite.py), with an S3-backed spool so traces survive tracking-server downtime
+- **Application tracing** — chat turns, tool calls and latency logged via [`app/services/mlflow_lite.py`](app/services/mlflow_lite.py), with an S3-backed spool so traces survive tracking-server downtime
 - **Experiment + asset registration** — [`step1_create_experiment.py`](MLFLOW_STEPS/step1_create_experiment.py), [`step2_register_assets.py`](MLFLOW_STEPS/step2_register_assets.py)
 - **Baseline evaluation** — [`step3_run_evaluation.py`](MLFLOW_STEPS/step3_run_evaluation.py) with custom scorers in [`evals/mlflow_scorers.py`](evals/mlflow_scorers.py)
 - **Iterative optimization** — [`step4_optimization.py`](MLFLOW_STEPS/step4_optimization.py) against a defined [optimization contract](evals/optimization_contract.py)
